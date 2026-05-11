@@ -1,0 +1,14 @@
+fastapi==0.115.9
+uvicorn[standard]
+sqlalchemy[asyncio]
+aiosqlite
+langchain
+langchain-openai
+langchain-community
+langchain-chroma
+langchain-text-splitters
+langgraph
+chromadb
+pydantic
+pydantic-settings
+python-dotenv

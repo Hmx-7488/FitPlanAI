@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+*.so
+venv/
+.venv/
+env/
+
+# 环境变量
+.env
+
+# 数据库
+*.db
+
+# 向量库（运行时自动生成）
+backend/data/vectorstore/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+frontend/node_modules/
+frontend/dist/
+*.log
+
+# 临时文件
+*.tmp
+*.bak
