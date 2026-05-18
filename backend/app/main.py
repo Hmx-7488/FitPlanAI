@@ -20,9 +20,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="减脂 Agent",
-    description="基于 Agentic RAG 的个性化减脂教练",
-    version="0.3.0",
+    title="FitPlanAI",
+    description="基于 LLM + LangGraph + RAG 的个性化减脂/增肌 AI Agent",
+    version="0.4.0",
     lifespan=lifespan,
 )
 
@@ -45,4 +45,4 @@ app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 @app.get("/")
 async def root():
-    return {"message": "减脂 Agent API", "version": "0.2.0"}
+    return {"message": "FitPlanAI API", "version": "0.4.0"}

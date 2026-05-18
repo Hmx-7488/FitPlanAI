@@ -255,6 +255,22 @@ def _build_recipe(name: str, lines: list[str], ingredients: list[IngredientItem]
                 protein = float(nums[0])
                 break
 
+    carbs = 0.0
+    for line in lines:
+        if "碳水" in line:
+            nums = re.findall(r"([\d.]+)", line)
+            if nums:
+                carbs = float(nums[0])
+                break
+
+    fat = 0.0
+    for line in lines:
+        if "脂肪" in line:
+            nums = re.findall(r"([\d.]+)", line)
+            if nums:
+                fat = float(nums[0])
+                break
+
     used = [ing.display_name for ing in ingredients if ing.display_name in full_text]
     if not used:
         used = [i.display_name for i in ingredients[:3]]
@@ -282,6 +298,7 @@ def _build_recipe(name: str, lines: list[str], ingredients: list[IngredientItem]
 
     return RecipeItem(
         name=name, ingredients=used,
-        calories_est=calories or 300, protein_est=protein or 20.0, steps=steps,
-        image=image,
+        calories_est=calories or 300, protein_est=protein or 20.0,
+        carbs_est=carbs or 30.0, fat_est=fat or 10.0,
+        steps=steps, image=image,
     )

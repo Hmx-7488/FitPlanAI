@@ -116,6 +116,8 @@ export interface RecipeItem {
   ingredients: string[]
   calories_est: number
   protein_est: number
+  carbs_est: number
+  fat_est: number
   steps: string
   image: RecipeImage
 }

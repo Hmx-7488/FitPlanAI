@@ -262,6 +262,8 @@ onMounted(async () => {
           <div class="recipe-tags">
             <span class="recipe-tag recipe-tag--cal">{{ r.calories_est }} kcal</span>
             <span class="recipe-tag recipe-tag--pro">{{ r.protein_est.toFixed(0) }}g 蛋白</span>
+            <span class="recipe-tag recipe-tag--carb">{{ r.carbs_est.toFixed(0) }}g 碳水</span>
+            <span class="recipe-tag recipe-tag--fat">{{ r.fat_est.toFixed(0) }}g 脂肪</span>
           </div>
           <div class="recipe-ingredients">
             <span v-for="ing in r.ingredients" :key="ing" class="recipe-ing">{{ ing }}</span>
@@ -380,6 +382,8 @@ onMounted(async () => {
 .recipe-tag { font-size: var(--text-xs); font-weight: 600; padding: 2px 8px; border-radius: var(--radius-sm); }
 .recipe-tag--cal { background: var(--color-accent-subtle); color: var(--color-accent); }
 .recipe-tag--pro { background: oklch(0.93 0.04 250); color: oklch(0.40 0.12 250); }
+.recipe-tag--carb { background: oklch(0.93 0.04 80); color: oklch(0.45 0.12 80); }
+.recipe-tag--fat { background: oklch(0.93 0.04 30); color: oklch(0.45 0.12 30); }
 .recipe-ingredients { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-3); }
 .recipe-ing { font-size: var(--text-xs); padding: 2px 8px; background: var(--color-surface); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-sm); color: var(--color-text-secondary); }
 .recipe-steps { font-size: var(--text-sm); color: var(--color-text-secondary); line-height: var(--leading-relaxed); }

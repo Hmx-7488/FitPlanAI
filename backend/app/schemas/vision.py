@@ -46,6 +46,8 @@ class RecipeItem(BaseModel):
     ingredients: list[str]   # 所用食材
     calories_est: int        # 估算热量
     protein_est: float       # 估算蛋白质(g)
+    carbs_est: float = 0     # 估算碳水(g)
+    fat_est: float = 0       # 估算脂肪(g)
     steps: str               # 做法简述
     image: RecipeImage = RecipeImage()  # 菜谱图片
 
