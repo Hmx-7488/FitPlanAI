@@ -12,9 +12,13 @@ async def create_profile(db: AsyncSession, data: ProfileCreate) -> User:
         height=data.height,
         weight=data.weight,
         target_weight=data.target_weight,
+        body_fat_rate=data.body_fat_rate,
         activity_level=data.activity_level,
         diet_preference=data.diet_preference,
+        goal_type=data.goal_type,
         forbidden_foods=json.dumps(data.forbidden_foods, ensure_ascii=False),
+        injuries=json.dumps(data.injuries, ensure_ascii=False),
+        allergies=json.dumps(data.allergies, ensure_ascii=False),
     )
     db.add(user)
     await db.commit()

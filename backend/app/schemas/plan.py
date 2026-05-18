@@ -1,3 +1,5 @@
+from datetime import datetime
+from typing import Optional
 from pydantic import BaseModel
 
 
@@ -10,6 +12,8 @@ class CalorieInfo(BaseModel):
     tdee: int
     target_calories: int
     deficit: int
+    goal_type: str = "fat_loss"
+    strategy: str = "calorie_deficit"
 
 
 class MacrosInfo(BaseModel):
@@ -21,6 +25,7 @@ class MacrosInfo(BaseModel):
 
 
 class PlanResponse(BaseModel):
+    status: str = "plan"
     id: int
     user_id: int
     daily_calorie_target: int
@@ -29,6 +34,14 @@ class PlanResponse(BaseModel):
     meal_plan: str
     workout_plan: str
     summary: str
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
+
+
+class NeedInfoResponse(BaseModel):
+    status: str = "need_info"
+    missing_fields: list[str]
+    field_warnings: list[str]
+    followup_questions: str

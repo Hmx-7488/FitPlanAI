@@ -94,9 +94,13 @@ async def get_user_review(db: AsyncSession, user_id: int) -> ReviewResponse:
         "height": user.height,
         "weight": user.weight,
         "target_weight": user.target_weight,
+        "body_fat_rate": user.body_fat_rate,
         "activity_level": user.activity_level,
         "diet_preference": user.diet_preference,
+        "goal_type": user.goal_type,
         "forbidden_foods": json.loads(user.forbidden_foods),
+        "injuries": json.loads(user.injuries),
+        "allergies": json.loads(user.allergies),
     }
 
     # 获取最近打卡记录

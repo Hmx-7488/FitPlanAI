@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = ""
     LLM_BASE_URL: str = "https://token-plan-cn.xiaomimimo.com/v1"
     LLM_MODEL: str = "mimo-v2.5-pro"
+    VISION_MODEL: str = ""  # 留空则使用 LLM_MODEL
     DATABASE_URL: str = "sqlite+aiosqlite:///./slim_agent.db"
 
     model_config = {

@@ -1,12 +1,14 @@
 import json
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.user import User, Plan
-from app.schemas.plan import PlanGenerateRequest, PlanResponse, CalorieInfo, MacrosInfo
+from app.schemas.plan import PlanGenerateRequest, PlanResponse, NeedInfoResponse, CalorieInfo, MacrosInfo
 from app.graph.workflow import run_workflow
 
 
-async def generate_plan(db: AsyncSession, request: PlanGenerateRequest) -> PlanResponse:
-    """生成减脂计划"""
+async def generate_plan(
+    db: AsyncSession, request: PlanGenerateRequest
+) -> PlanResponse | NeedInfoResponse:
+    """生成减脂计划。返回 PlanResponse 或 NeedInfoResponse。"""
     # 获取用户信息
     user = await db.get(User, request.user_id)
     if not user:
@@ -18,18 +20,32 @@ async def generate_plan(db: AsyncSession, request: PlanGenerateRequest) -> PlanR
         "height": user.height,
         "weight": user.weight,
         "target_weight": user.target_weight,
+        "body_fat_rate": user.body_fat_rate,
         "activity_level": user.activity_level,
         "diet_preference": user.diet_preference,
+        "goal_type": user.goal_type,
         "forbidden_foods": json.loads(user.forbidden_foods),
+        "injuries": json.loads(user.injuries),
+        "allergies": json.loads(user.allergies),
     }
 
     # 执行LangGraph工作流
     result = await run_workflow(user_profile)
 
+    # Agent 判断信息不完整，返回追问
+    if result["status"] == "need_info":
+        return NeedInfoResponse(
+            missing_fields=result["missing_fields"],
+            field_warnings=result["field_warnings"],
+            followup_questions=result["followup_questions"],
+        )
+
     # 保存计划到数据库
     plan = Plan(
         user_id=user.id,
         daily_calorie_target=result["calorie_info"]["target_calories"],
+        calorie_info_json=json.dumps(result["calorie_info"], ensure_ascii=False),
+        macros_json=json.dumps(result["macros"], ensure_ascii=False),
         meal_plan=result["meal_plan"],
         workout_plan=result["workout_plan"],
         summary=result["summary"],
@@ -47,4 +63,5 @@ async def generate_plan(db: AsyncSession, request: PlanGenerateRequest) -> PlanR
         meal_plan=result["meal_plan"],
         workout_plan=result["workout_plan"],
         summary=result["summary"],
+        created_at=plan.created_at,
     )

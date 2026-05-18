@@ -68,7 +68,7 @@ cp .env.example .env
 # 编辑 .env 填入 LLM_API_KEY
 
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
+python -m uvicorn app.main:app --reload --port 8000
 ```
 
 访问 http://127.0.0.1:8000/docs 查看 API 文档。

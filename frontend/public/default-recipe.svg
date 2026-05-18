@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 240" fill="none">
+  <rect width="400" height="240" fill="#f5f5f5"/>
+  <circle cx="200" cy="100" r="48" fill="#e0e0e0"/>
+  <path d="M176 92c0-8 4-16 12-20l24-8 24 8c8 4 12 12 12 20v16c0 12-10 24-24 28l-12 4-12-4c-14-4-24-16-24-28V92z" fill="#ccc"/>
+  <path d="M180 96l8-12h24l8 12" stroke="#bbb" stroke-width="2" fill="none"/>
+  <rect x="160" y="160" width="80" height="8" rx="4" fill="#e0e0e0"/>
+  <rect x="180" y="176" width="40" height="6" rx="3" fill="#eaeaea"/>
+  <text x="200" y="210" text-anchor="middle" font-family="system-ui" font-size="12" fill="#999">菜谱成品图</text>
+</svg>
