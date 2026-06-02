@@ -1,15 +1,30 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, nextTick, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import axios from 'axios'
 import type { BodyPhotoAnalysis } from '../types'
+import gsap from 'gsap'
 
 const router = useRouter()
 const loading = ref(false)
 const selectedFile = ref<File | null>(null)
 const previewUrl = ref('')
 const result = ref<BodyPhotoAnalysis | null>(null)
+const pageRef = useTemplateRef<HTMLElement>('pageRef')
+
+function animateResult() {
+  nextTick(() => {
+    if (!pageRef.value) return
+    const tl = gsap.timeline({ defaults: { ease: 'power3.out' } })
+    tl.from(pageRef.value.querySelectorAll('.result-header'), { y: 20, opacity: 0, duration: 0.4 })
+    tl.from(pageRef.value.querySelectorAll('.photo-preview'), { y: 20, opacity: 0, scale: 0.97, duration: 0.5 }, '-=0.2')
+    tl.from(pageRef.value.querySelectorAll('.card'), { y: 25, opacity: 0, stagger: 0.1, duration: 0.5 }, '-=0.3')
+    tl.from(pageRef.value.querySelectorAll('.result-actions'), { y: 15, opacity: 0, duration: 0.3 }, '-=0.1')
+  })
+}
+
+watch(result, (val) => { if (val) animateResult() })
 
 function onFileChange(e: Event) {
   const input = e.target as HTMLInputElement
@@ -57,7 +72,7 @@ function reset() {
 </script>
 
 <template>
-  <div class="body-photo-page">
+  <div class="body-photo-page" ref="pageRef">
     <div class="page-header">
       <h1>身材照片分析</h1>
       <p>上传全身照片，AI 估算体脂率和训练重点。</p>

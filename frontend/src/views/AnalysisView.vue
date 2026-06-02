@@ -1,16 +1,18 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, nextTick, useTemplateRef } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getProfile } from '../api'
 import { analyzeProfile } from '../utils/calc'
 import type { UserProfileResponse } from '../types'
 import type { AnalysisResult } from '../utils/calc'
+import gsap from 'gsap'
 
 const router = useRouter()
 const loading = ref(true)
 const profile = ref<UserProfileResponse | null>(null)
 const analysis = ref<AnalysisResult | null>(null)
+const pageRef = useTemplateRef<HTMLElement>('pageRef')
 
 const bmiBarPercent = computed(() => {
   if (!analysis.value) return 0
@@ -45,12 +47,46 @@ onMounted(async () => {
     router.push('/profile')
   } finally {
     loading.value = false
+    await nextTick()
+    if (!pageRef.value) return
+    const tl = gsap.timeline({ defaults: { ease: 'power3.out' } })
+    tl.from(pageRef.value.querySelectorAll('.page-header'), { y: 20, opacity: 0, duration: 0.5 })
+    tl.from(pageRef.value.querySelectorAll('.bmi-card'), { y: 30, opacity: 0, scale: 0.97, duration: 0.6 }, '-=0.3')
+    tl.from(pageRef.value.querySelectorAll('.data-item'), { y: 25, opacity: 0, stagger: 0.1, duration: 0.5 }, '-=0.3')
+    tl.from(pageRef.value.querySelectorAll('.macro-item'), { y: 20, opacity: 0, scale: 0.9, stagger: 0.08, duration: 0.4 }, '-=0.2')
+    tl.from(pageRef.value.querySelectorAll('.forecast-card'), { y: 25, opacity: 0, duration: 0.5 }, '-=0.2')
+    tl.from(pageRef.value.querySelectorAll('.section--pref'), { y: 20, opacity: 0, duration: 0.5 }, '-=0.2')
+    tl.from(pageRef.value.querySelectorAll('.actions'), { y: 15, opacity: 0, duration: 0.3 }, '-=0.1')
+    // BMI 条动画
+    const bmiFill = pageRef.value.querySelector('.bmi-bar-fill') as HTMLElement
+    if (bmiFill) {
+      const targetWidth = bmiFill.style.width
+      gsap.fromTo(bmiFill, { width: '0%' }, { width: targetWidth, duration: 1.2, ease: 'power2.out', delay: 0.6 })
+    }
+    // 数字滚动
+    const numEls = pageRef.value.querySelectorAll('.data-value, .macro-value, .bmi-number, .forecast-value')
+    numEls.forEach(el => {
+      const target = parseFloat(el.textContent?.replace(/[^0-9.]/g, '') || '0')
+      if (target > 0) {
+        const obj = { val: 0 }
+        gsap.to(obj, {
+          val: target,
+          duration: 1,
+          ease: 'power2.out',
+          delay: 0.4,
+          onUpdate() {
+            const suffix = el.querySelector('small')?.textContent || ''
+            el.childNodes[0].textContent = Math.round(obj.val).toLocaleString()
+          },
+        })
+      }
+    })
   }
 })
 </script>
 
 <template>
-  <div class="analysis-page">
+  <div class="analysis-page" ref="pageRef">
     <!-- Loading skeleton -->
     <div v-if="loading" class="skeleton-analysis">
       <div class="skeleton skeleton-title"></div>

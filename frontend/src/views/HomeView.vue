@@ -1,15 +1,19 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, nextTick, useTemplateRef } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getDashboard, type DashboardData } from '../api'
-import { analyzeProfile } from '../utils/calc'
-import type { UserProfile } from '../types'
+import { heroEntrance, dashboardEntrance, flowStepsEntrance, progressFillIn, countUp } from '../utils/animations'
 
 const router = useRouter()
 const loading = ref(true)
 const data = ref<DashboardData | null>(null)
 const hasProfile = ref(false)
+const pageRef = useTemplateRef<HTMLElement>('pageRef')
+const consumedRef = useTemplateRef<HTMLElement>('consumedRef')
+const streakRef = useTemplateRef<HTMLElement>('streakRef')
+const weightRef = useTemplateRef<HTMLElement>('weightRef')
+const progressRef = useTemplateRef<HTMLElement>('progressRef')
 
 const mealProgressPct = computed(() => {
   if (!data.value) return 0
@@ -49,6 +53,10 @@ onMounted(async () => {
   if (!userId) {
     hasProfile.value = false
     loading.value = false
+    await nextTick()
+    if (pageRef.value) heroEntrance(pageRef.value)
+    await nextTick()
+    if (pageRef.value) flowStepsEntrance(pageRef.value)
     return
   }
   try {
@@ -58,12 +66,26 @@ onMounted(async () => {
     hasProfile.value = false
   } finally {
     loading.value = false
+    await nextTick()
+    if (!pageRef.value) return
+    if (hasProfile.value && data.value) {
+      dashboardEntrance(pageRef.value)
+      // 数字滚动
+      if (consumedRef.value) countUp(consumedRef.value, data.value.meal_summary.consumed_kcal)
+      if (streakRef.value) countUp(streakRef.value, data.value.checkin_summary.streak, { suffix: '' })
+      if (weightRef.value) countUp(weightRef.value, data.value.checkin_summary.latest_weight, { suffix: '', duration: 1 })
+      // 进度条
+      if (progressRef.value) progressFillIn(progressRef.value, data.value.meal_summary.progress_pct)
+    } else {
+      heroEntrance(pageRef.value)
+      flowStepsEntrance(pageRef.value)
+    }
   }
 })
 </script>
 
 <template>
-  <div class="home">
+  <div class="home" ref="pageRef">
     <!-- 未建档：引导页 -->
     <template v-if="!loading && !hasProfile">
       <section class="hero">
@@ -131,13 +153,13 @@ onMounted(async () => {
       <section class="calorie-card">
         <div class="calorie-top">
           <div class="calorie-main">
-            <span class="calorie-consumed">{{ data.meal_summary.consumed_kcal }}</span>
+            <span class="calorie-consumed" ref="consumedRef">{{ data.meal_summary.consumed_kcal }}</span>
             <span class="calorie-unit">/ {{ data.meal_summary.target_kcal }} kcal</span>
           </div>
           <span class="calorie-status" :style="{ color: calorieStatus.color }">{{ calorieStatus.label }}</span>
         </div>
         <div class="progress-track">
-          <div class="progress-fill" :style="{ width: mealProgressPct + '%', backgroundColor: calorieStatus.color }"></div>
+          <div class="progress-fill" ref="progressRef" :style="{ width: '0%', backgroundColor: calorieStatus.color }"></div>
         </div>
         <div class="calorie-detail">
           <span>剩余 <strong>{{ data.meal_summary.remaining_kcal }}</strong> kcal</span>
@@ -159,7 +181,7 @@ onMounted(async () => {
         <div class="stat-card" @click="router.push('/checkin')">
           <div class="stat-icon">&#128293;</div>
           <div class="stat-body">
-            <span class="stat-value">{{ data.checkin_summary.streak }}<small>天</small></span>
+            <span class="stat-value"><span ref="streakRef">0</span><small>天</small></span>
             <span class="stat-label">连续打卡</span>
           </div>
           <span class="stat-badge" v-if="data.checkin_summary.today_checked">今日已打卡</span>
@@ -170,7 +192,7 @@ onMounted(async () => {
         <div class="stat-card" @click="router.push('/analysis')">
           <div class="stat-icon">&#9878;&#65039;</div>
           <div class="stat-body">
-            <span class="stat-value">{{ data.checkin_summary.latest_weight }}<small>kg</small></span>
+            <span class="stat-value"><span ref="weightRef">0</span><small>kg</small></span>
             <span class="stat-label">目标 {{ data.profile.target_weight }}kg（差 {{ weightDiff }}kg）</span>
           </div>
           <span class="stat-badge" v-if="data.checkin_summary.weight_change !== 0">

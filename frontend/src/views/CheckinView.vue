@@ -1,12 +1,25 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted, nextTick, useTemplateRef } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { createCheckin } from '../api'
 import type { CheckinData } from '../types'
+import gsap from 'gsap'
 
 const router = useRouter()
 const loading = ref(false)
+const pageRef = useTemplateRef<HTMLElement>('pageRef')
+
+onMounted(() => {
+  nextTick(() => {
+    if (!pageRef.value) return
+    const tl = gsap.timeline({ defaults: { ease: 'power3.out' } })
+    tl.from(pageRef.value.querySelectorAll('.page-header'), { y: 20, opacity: 0, duration: 0.5 })
+    tl.from(pageRef.value.querySelectorAll('.checkin-form'), { y: 25, opacity: 0, duration: 0.5 }, '-=0.3')
+    tl.from(pageRef.value.querySelectorAll('.form-field'), { y: 15, opacity: 0, stagger: 0.06, duration: 0.3 }, '-=0.2')
+    tl.from(pageRef.value.querySelectorAll('.form-actions'), { y: 15, opacity: 0, duration: 0.3 }, '-=0.1')
+  })
+})
 
 const today = new Date().toISOString().split('T')[0]
 
@@ -46,7 +59,7 @@ async function handleSubmit() {
 </script>
 
 <template>
-  <div class="checkin-page">
+  <div class="checkin-page" ref="pageRef">
     <div class="page-header">
       <h1>每日打卡</h1>
       <p>记录今天的饮食和运动。</p>

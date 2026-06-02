@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, nextTick, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import axios from 'axios'
 import type { MealAnalysis } from '../types'
+import gsap from 'gsap'
 
 const router = useRouter()
 const loading = ref(false)
@@ -11,6 +12,28 @@ const selectedFile = ref<File | null>(null)
 const previewUrl = ref('')
 const result = ref<MealAnalysis | null>(null)
 const mealType = ref('lunch')
+const pageRef = useTemplateRef<HTMLElement>('pageRef')
+
+function animateResult() {
+  nextTick(() => {
+    if (!pageRef.value) return
+    const tl = gsap.timeline({ defaults: { ease: 'power3.out' } })
+    tl.from(pageRef.value.querySelectorAll('.result-header, .photo-preview'), { y: 20, opacity: 0, duration: 0.4 })
+    tl.from(pageRef.value.querySelectorAll('.total-card'), { y: 30, opacity: 0, scale: 0.95, duration: 0.5 }, '-=0.2')
+    tl.from(pageRef.value.querySelectorAll('.summary-card'), { y: 25, opacity: 0, duration: 0.5 }, '-=0.3')
+    tl.from(pageRef.value.querySelectorAll('.items-card'), { y: 20, opacity: 0, duration: 0.4 }, '-=0.2')
+    tl.from(pageRef.value.querySelectorAll('.question'), { y: 15, opacity: 0, duration: 0.3 }, '-=0.1')
+    // 热量数字滚动
+    const calEl = pageRef.value.querySelector('.total-value') as HTMLElement
+    if (calEl) {
+      const target = parseInt(calEl.textContent || '0')
+      const obj = { val: 0 }
+      gsap.to(obj, { val: target, duration: 1, ease: 'power2.out', delay: 0.3, onUpdate() { calEl.textContent = Math.round(obj.val).toString() } })
+    }
+  })
+}
+
+watch(result, (val) => { if (val) animateResult() })
 
 const mealTypeOptions = [
   { value: 'breakfast', label: '早餐' },
@@ -83,7 +106,7 @@ function statusLabel(status: string): string {
 </script>
 
 <template>
-  <div class="meal-page">
+  <div class="meal-page" ref="pageRef">
     <div class="page-header">
       <h1>餐食热量识别</h1>
       <p>拍照识别已吃的餐食，AI 估算热量并计算每日缺口。</p>

@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, nextTick, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { recognizeIngredients, confirmIngredients, generateRecipes, getLatestRecipe } from '../api'
 import type { IngredientItem, RecognizeResponse, RecipeResponse } from '../types'
+import gsap from 'gsap'
 
 const router = useRouter()
+const pageRef = useTemplateRef<HTMLElement>('pageRef')
 
 // 状态：upload | recognizing | confirm | generating | result
 const step = ref<'upload' | 'recognizing' | 'confirm' | 'generating' | 'result'>('upload')
@@ -15,6 +17,20 @@ const recognition = ref<RecognizeResponse | null>(null)
 const editableIngredients = ref<IngredientItem[]>([])
 const recipes = ref<RecipeResponse | null>(null)
 const loadingMsg = ref('')
+
+function animateStep() {
+  nextTick(() => {
+    if (!pageRef.value) return
+    gsap.from(pageRef.value.querySelectorAll('.page-header, .upload-area, .confirm-header, .confirm-preview, .ingredient-list, .recipe-list, .result-header'), {
+      y: 25, opacity: 0, duration: 0.5, ease: 'power3.out', stagger: 0.08,
+    })
+    gsap.from(pageRef.value.querySelectorAll('.ingredient-item, .recipe-card'), {
+      y: 20, opacity: 0, scale: 0.97, duration: 0.4, stagger: 0.06, ease: 'power2.out', delay: 0.2,
+    })
+  })
+}
+
+watch(step, () => animateStep())
 
 function onFileChange(e: Event) {
   const input = e.target as HTMLInputElement
@@ -137,7 +153,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="food-page">
+  <div class="food-page" ref="pageRef">
     <!-- Header -->
     <div class="page-header">
       <h1>食材识别</h1>

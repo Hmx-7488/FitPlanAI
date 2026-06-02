@@ -1,9 +1,30 @@
 <script setup lang="ts">
+import { onMounted, useTemplateRef } from 'vue'
+import gsap from 'gsap'
+
+const headerRef = useTemplateRef<HTMLElement>('headerRef')
+
+onMounted(() => {
+  if (headerRef.value) {
+    gsap.from(headerRef.value, { y: -20, opacity: 0, duration: 0.5, ease: 'power3.out' })
+    gsap.from(headerRef.value.querySelectorAll('.nav-link'), {
+      y: -10, opacity: 0, stagger: 0.04, duration: 0.3, ease: 'power2.out', delay: 0.2,
+    })
+  }
+})
+
+function onEnter(el: Element, done: () => void) {
+  gsap.from(el, { y: 15, opacity: 0, duration: 0.35, ease: 'power2.out', onComplete: done })
+}
+
+function onLeave(el: Element, done: () => void) {
+  gsap.to(el, { y: -10, opacity: 0, duration: 0.2, ease: 'power2.in', onComplete: done })
+}
 </script>
 
 <template>
   <div class="app-shell">
-    <header class="app-header">
+    <header class="app-header" ref="headerRef">
       <div class="header-inner">
         <router-link to="/" class="brand">
           <span class="brand-mark">&#9679;</span>
@@ -25,7 +46,7 @@
     </header>
     <main class="app-main">
       <router-view v-slot="{ Component }">
-        <transition name="fade" mode="out-in">
+        <transition @enter="onEnter" @leave="onLeave" mode="out-in" :css="false">
           <component :is="Component" />
         </transition>
       </router-view>
@@ -44,9 +65,10 @@
   position: sticky;
   top: 0;
   z-index: 100;
-  background: var(--color-surface);
+  background: oklch(1 0 0 / 0.85);
   border-bottom: 1px solid var(--color-border-subtle);
-  backdrop-filter: blur(8px);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
 .header-inner {

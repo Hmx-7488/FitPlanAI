@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, nextTick, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getLatestPlan, generatePlan } from '../api'
 import type { PlanResponse, NeedInfoResponse } from '../types'
+import gsap from 'gsap'
 
 const router = useRouter()
+const pageRef = useTemplateRef<HTMLElement>('pageRef')
 const loading = ref(false)
 const initialLoading = ref(true)
 const plan = ref<PlanResponse | null>(null)
@@ -119,16 +121,38 @@ function formatPlan(text: string): string {
     .replace(/#{1,3}\s(.+)/g, '<h4>$1</h4>')
 }
 
+function animatePlan() {
+  nextTick(() => {
+    if (!pageRef.value) return
+    const tl = gsap.timeline({ defaults: { ease: 'power3.out' } })
+    tl.from(pageRef.value.querySelectorAll('.hero-metric'), { y: 30, opacity: 0, scale: 0.95, duration: 0.6 })
+    tl.from(pageRef.value.querySelectorAll('.macro-item'), { y: 20, opacity: 0, scale: 0.9, stagger: 0.08, duration: 0.4 }, '-=0.3')
+    tl.from(pageRef.value.querySelectorAll('.tabs'), { y: 15, opacity: 0, duration: 0.4 }, '-=0.2')
+    tl.from(pageRef.value.querySelectorAll('.plan-content'), { y: 25, opacity: 0, duration: 0.5 }, '-=0.2')
+    tl.from(pageRef.value.querySelectorAll('.summary-section'), { y: 20, opacity: 0, duration: 0.5 }, '-=0.2')
+    // 数字滚动
+    const metricEl = pageRef.value.querySelector('.metric-value') as HTMLElement
+    if (metricEl) {
+      const target = parseInt(metricEl.textContent || '0')
+      const obj = { val: 0 }
+      gsap.to(obj, { val: target, duration: 1.2, ease: 'power2.out', delay: 0.2, onUpdate() { metricEl.textContent = Math.round(obj.val).toLocaleString() } })
+    }
+  })
+}
+
+watch(() => plan.value, (val) => { if (val) animatePlan() })
+
 onMounted(async () => {
   const userId = localStorage.getItem('userId')
   if (!userId) { initialLoading.value = false; return }
   await loadExistingPlan()
   initialLoading.value = false
+  if (plan.value) animatePlan()
 })
 </script>
 
 <template>
-  <div class="plan-page">
+  <div class="plan-page" ref="pageRef">
     <!-- Initial page loading -->
     <div v-if="initialLoading" class="loading-state">
       <div class="skeleton skeleton-line" style="width:200px;height:24px;margin:var(--space-8) auto"></div>

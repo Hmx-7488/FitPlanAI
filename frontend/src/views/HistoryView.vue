@@ -1,13 +1,27 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, nextTick, useTemplateRef } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getCheckinHistory, getReview } from '../api'
 import type { CheckinResponse, ReviewResponse } from '../types'
+import gsap from 'gsap'
 
 const router = useRouter()
 const loading = ref(false)
 const reviewLoading = ref(false)
+const pageRef = useTemplateRef<HTMLElement>('pageRef')
+
+function animatePage() {
+  nextTick(() => {
+    if (!pageRef.value) return
+    const tl = gsap.timeline({ defaults: { ease: 'power3.out' } })
+    tl.from(pageRef.value.querySelectorAll('.page-header'), { y: 20, opacity: 0, duration: 0.5 })
+    tl.from(pageRef.value.querySelectorAll('.history-list'), { y: 25, opacity: 0, duration: 0.5 }, '-=0.3')
+    tl.from(pageRef.value.querySelectorAll('.checkin-item'), { x: -20, opacity: 0, stagger: 0.06, duration: 0.4 }, '-=0.2')
+    tl.from(pageRef.value.querySelectorAll('.review-section'), { y: 25, opacity: 0, duration: 0.5 }, '-=0.2')
+    tl.from(pageRef.value.querySelectorAll('.review-actions'), { y: 15, opacity: 0, duration: 0.3 }, '-=0.1')
+  })
+}
 const checkins = ref<CheckinResponse[]>([])
 const review = ref<ReviewResponse | null>(null)
 const activeTab = ref<'history' | 'review'>('history')
@@ -66,11 +80,12 @@ onMounted(() => {
   // 恢复上次复盘结果
   const saved = loadReviewFromStorage()
   if (saved) review.value = saved
+  animatePage()
 })
 </script>
 
 <template>
-  <div class="history-page">
+  <div class="history-page" ref="pageRef">
     <div class="page-header">
       <div>
         <h1>打卡记录</h1>

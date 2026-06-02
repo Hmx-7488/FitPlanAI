@@ -1,13 +1,26 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, nextTick, useTemplateRef } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { createProfile, getProfile, estimateBodyFat } from '../api'
 import type { UserProfile } from '../types'
+import gsap from 'gsap'
 
 const router = useRouter()
 const loading = ref(false)
 const profileLoaded = ref(false)
+const pageRef = useTemplateRef<HTMLElement>('pageRef')
+
+function animatePage() {
+  nextTick(() => {
+    if (!pageRef.value) return
+    const tl = gsap.timeline({ defaults: { ease: 'power3.out' } })
+    tl.from(pageRef.value.querySelectorAll('.page-header'), { y: 20, opacity: 0, duration: 0.5 })
+    tl.from(pageRef.value.querySelectorAll('.form-grid'), { y: 25, opacity: 0, duration: 0.5 }, '-=0.3')
+    tl.from(pageRef.value.querySelectorAll('.form-field'), { y: 15, opacity: 0, stagger: 0.05, duration: 0.3 }, '-=0.2')
+    tl.from(pageRef.value.querySelectorAll('.form-actions, .submit-section'), { y: 15, opacity: 0, duration: 0.4 }, '-=0.1')
+  })
+}
 
 // 建档流程状态：form → photo → analyzing → result
 const step = ref<'form' | 'photo' | 'analyzing' | 'result'>('form')
@@ -120,6 +133,7 @@ onMounted(async () => {
       profileLoaded.value = true
     }
   } catch { /* 首次建档，无已有数据 */ }
+  animatePage()
 })
 
 async function handleSubmit() {
@@ -194,7 +208,7 @@ function goToAnalysis() {
 </script>
 
 <template>
-  <div class="profile-page">
+  <div class="profile-page" ref="pageRef">
     <div class="page-header">
       <h1>{{ profileLoaded ? '修改你的档案' : '建立你的档案' }}</h1>
       <p>{{ profileLoaded ? '修改身体数据和偏好，提交后可重新生成计划。' : '填写身体数据和饮食偏好。' }}</p>
