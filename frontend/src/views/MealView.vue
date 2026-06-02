@@ -43,6 +43,11 @@ const mealTypeOptions = [
   { value: 'snack', label: '加餐' },
 ]
 
+// 切换餐食类型时清除上传状态
+watch(mealType, () => {
+  reset()
+})
+
 function onFileChange(e: Event) {
   const input = e.target as HTMLInputElement
   const file = input.files?.[0]
