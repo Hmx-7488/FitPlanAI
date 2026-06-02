@@ -219,7 +219,7 @@ async def recognize_meal(
             "- display_name: 食材中文名\n"
             "- estimated_weight_g: 估算重量（克）\n"
             "- confidence: 置信度 0-1\n"
-            "只输出 JSON 数组，不要其他文字。"
+            "只输出 JSON 数组，不要其他文字。如果没有识别到食材，返回空数组 []。"
         )
 
         message = HumanMessage(content=[
@@ -236,8 +236,15 @@ async def recognize_meal(
             json_end = raw.rfind("]") + 1
             raw = raw[json_start:json_end]
         ingredients = json.loads(raw)
-    except Exception:
-        # 降级到 mock
+
+        # 验证解析结果
+        if not isinstance(ingredients, list):
+            raise ValueError("Vision Model 返回格式错误")
+
+    except Exception as e:
+        # 记录错误并降级到 mock
+        import logging
+        logging.error(f"Vision Model 调用失败: {e}")
         ingredients = [
             {
                 "name": "unknown",
