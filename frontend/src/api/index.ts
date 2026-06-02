@@ -199,3 +199,76 @@ export async function analyzePose(userId: number, imageFile: File, movementName:
   })
   return res.data
 }
+
+// 餐食识别（新流程）
+export interface MealRecognizeResponse {
+  recognition_id: string
+  ingredients: Array<{
+    name: string
+    display_name: string
+    estimated_weight_g: number
+    confidence: number
+  }>
+}
+
+export interface MealCalculateRequest {
+  recognition_id: string
+  ingredients: Array<{
+    name: string
+    display_name: string
+    estimated_weight_g: number
+    confidence?: number
+  }>
+  meal_type: string
+}
+
+export interface MealAnalysis {
+  meal_type: string
+  items: Array<{
+    dish_name: string
+    calories_kcal: number
+    protein_g: number
+    carbs_g: number
+    fat_g: number
+    estimated_portion_g: number
+    confidence?: number
+  }>
+  meal_total: {
+    calories_kcal: number
+    protein_g: number
+    carbs_g: number
+    fat_g: number
+  }
+  daily_summary: {
+    daily_target_kcal: number
+    estimated_tdee_kcal: number
+    consumed_kcal: number
+    remaining_target_kcal: number
+    current_deficit_kcal: number
+    status: string
+    suggestion: string
+  }
+}
+
+export async function recognizeMeal(
+  userId: number,
+  imageFile: File
+): Promise<MealRecognizeResponse> {
+  const formData = new FormData()
+  formData.append('user_id', String(userId))
+  formData.append('image', imageFile)
+  const res = await api.post<MealRecognizeResponse>('/meal/recognize', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000,
+  })
+  return res.data
+}
+
+export async function calculateMeal(
+  data: MealCalculateRequest
+): Promise<MealAnalysis> {
+  const res = await api.post<MealAnalysis>('/meal/calculate', data, {
+    timeout: 120000,
+  })
+  return res.data
+}

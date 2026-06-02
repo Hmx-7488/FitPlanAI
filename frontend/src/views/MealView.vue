@@ -2,34 +2,45 @@
 import { ref, computed, nextTick, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import axios from 'axios'
-import type { MealAnalysis } from '../types'
+import { recognizeMeal, calculateMeal } from '../api'
+import type { MealAnalysis, MealRecognizeResponse } from '../api'
 import gsap from 'gsap'
 
 const router = useRouter()
 const loading = ref(false)
+const calculating = ref(false)
 const mealType = ref('lunch')
 const pageRef = useTemplateRef<HTMLElement>('pageRef')
 const fileInputRef = useTemplateRef<HTMLInputElement>('fileInputRef')
 
 // 每个餐食类型独立保存状态
 interface MealState {
+  step: 'upload' | 'recognizing' | 'confirm' | 'calculating' | 'result'
   selectedFile: File | null
   previewUrl: string
+  recognitionId: string
+  ingredients: Array<{
+    name: string
+    display_name: string
+    estimated_weight_g: number
+    confidence: number
+  }>
   result: MealAnalysis | null
 }
 
 const mealStates = ref<Record<string, MealState>>({
-  breakfast: { selectedFile: null, previewUrl: '', result: null },
-  lunch: { selectedFile: null, previewUrl: '', result: null },
-  dinner: { selectedFile: null, previewUrl: '', result: null },
-  snack: { selectedFile: null, previewUrl: '', result: null },
+  breakfast: { step: 'upload', selectedFile: null, previewUrl: '', recognitionId: '', ingredients: [], result: null },
+  lunch: { step: 'upload', selectedFile: null, previewUrl: '', recognitionId: '', ingredients: [], result: null },
+  dinner: { step: 'upload', selectedFile: null, previewUrl: '', recognitionId: '', ingredients: [], result: null },
+  snack: { step: 'upload', selectedFile: null, previewUrl: '', recognitionId: '', ingredients: [], result: null },
 })
 
 // 计算当前选中餐食类型的状态
 const currentState = computed(() => mealStates.value[mealType.value])
+const step = computed(() => currentState.value.step)
 const selectedFile = computed(() => currentState.value.selectedFile)
 const previewUrl = computed(() => currentState.value.previewUrl)
+const ingredients = computed(() => currentState.value.ingredients)
 const result = computed(() => currentState.value.result)
 
 function animateResult() {
@@ -40,7 +51,6 @@ function animateResult() {
     tl.from(pageRef.value.querySelectorAll('.total-card'), { y: 30, opacity: 0, scale: 0.95, duration: 0.5 }, '-=0.2')
     tl.from(pageRef.value.querySelectorAll('.summary-card'), { y: 25, opacity: 0, duration: 0.5 }, '-=0.3')
     tl.from(pageRef.value.querySelectorAll('.items-card'), { y: 20, opacity: 0, duration: 0.4 }, '-=0.2')
-    tl.from(pageRef.value.querySelectorAll('.question'), { y: 15, opacity: 0, duration: 0.3 }, '-=0.1')
     // 热量数字滚动
     const calEl = pageRef.value.querySelector('.total-value') as HTMLElement
     if (calEl) {
@@ -80,7 +90,7 @@ function onFileChange(e: Event) {
   mealStates.value[mealType.value].previewUrl = URL.createObjectURL(file)
 }
 
-async function doAnalyze() {
+async function doRecognize() {
   if (!currentState.value.selectedFile) return
   const userId = localStorage.getItem('userId')
   if (!userId) {
@@ -89,29 +99,84 @@ async function doAnalyze() {
     return
   }
 
+  mealStates.value[mealType.value].step = 'recognizing'
   loading.value = true
+
   try {
-    const formData = new FormData()
-    formData.append('user_id', userId)
-    formData.append('meal_type', mealType.value)
-    formData.append('image', currentState.value.selectedFile)
-    const res = await axios.post('/api/meal/analyze', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 120000,
-    })
-    mealStates.value[mealType.value].result = res.data
-    ElMessage.success('识别完成')
+    const res = await recognizeMeal(Number(userId), currentState.value.selectedFile)
+    mealStates.value[mealType.value].recognitionId = res.recognition_id
+    mealStates.value[mealType.value].ingredients = res.ingredients.map(i => ({ ...i }))
+    mealStates.value[mealType.value].step = 'confirm'
+    ElMessage.success('识别完成，请确认食材')
   } catch (err: any) {
     ElMessage.error(err.response?.data?.detail || '识别失败')
+    mealStates.value[mealType.value].step = 'upload'
   } finally {
     loading.value = false
   }
 }
 
+function updateWeight(index: number, value: string) {
+  const num = parseFloat(value)
+  if (!isNaN(num) && num > 0) {
+    mealStates.value[mealType.value].ingredients[index].estimated_weight_g = num
+  }
+}
+
+function removeIngredient(index: number) {
+  mealStates.value[mealType.value].ingredients.splice(index, 1)
+}
+
+function addIngredient() {
+  mealStates.value[mealType.value].ingredients.push({
+    name: 'custom',
+    display_name: '',
+    estimated_weight_g: 100,
+    confidence: 1.0,
+  })
+}
+
+async function doCalculate() {
+  const state = mealStates.value[mealType.value]
+  if (state.ingredients.length === 0) {
+    ElMessage.warning('请至少保留一个食材')
+    return
+  }
+
+  // 过滤掉空名称的
+  const valid = state.ingredients.filter(i => i.display_name.trim())
+  if (valid.length === 0) {
+    ElMessage.warning('请至少保留一个食材')
+    return
+  }
+
+  calculating.value = true
+  mealStates.value[mealType.value].step = 'calculating'
+
+  try {
+    const res = await calculateMeal({
+      recognition_id: state.recognitionId,
+      ingredients: valid,
+      meal_type: mealType.value,
+    })
+    mealStates.value[mealType.value].result = res
+    mealStates.value[mealType.value].step = 'result'
+    ElMessage.success('计算完成')
+  } catch (err: any) {
+    ElMessage.error(err.response?.data?.detail || '计算失败')
+    mealStates.value[mealType.value].step = 'confirm'
+  } finally {
+    calculating.value = false
+  }
+}
+
 function resetCurrentMeal() {
   mealStates.value[mealType.value] = {
+    step: 'upload',
     selectedFile: null,
     previewUrl: '',
+    recognitionId: '',
+    ingredients: [],
     result: null
   }
   if (fileInputRef.value) {
@@ -143,43 +208,114 @@ function statusLabel(status: string): string {
       <p>拍照识别已吃的餐食，AI 估算热量并计算每日缺口。</p>
     </div>
 
-    <!-- Upload -->
-    <div v-if="!result" class="upload-section">
-      <div class="meal-type-select">
-        <label class="field-label">餐次</label>
-        <div class="radio-group">
-          <button
-            v-for="opt in mealTypeOptions"
-            :key="opt.value"
-            class="radio-btn"
-            :class="{ 'radio-btn--active': mealType === opt.value }"
-            @click="mealType = opt.value"
-          >{{ opt.label }}</button>
-        </div>
+    <!-- 餐次选择（常驻显示） -->
+    <div class="meal-type-select">
+      <label class="field-label">餐次</label>
+      <div class="radio-group">
+        <button
+          v-for="opt in mealTypeOptions"
+          :key="opt.value"
+          class="radio-btn"
+          :class="{ 'radio-btn--active': mealType === opt.value, 'radio-btn--done': mealStates[opt.value].step === 'result' }"
+          @click="mealType = opt.value"
+        >
+          {{ opt.label }}
+          <span v-if="mealStates[opt.value].step === 'result'" class="done-dot"></span>
+        </button>
       </div>
+    </div>
 
+    <!-- Step 1: Upload -->
+    <div v-if="step === 'upload'" class="upload-section">
       <div class="upload-area" @click="fileInputRef?.click()">
         <div v-if="previewUrl" class="preview">
           <img :src="previewUrl" alt="预览" />
         </div>
         <div v-else class="upload-placeholder">
           <span class="upload-icon">&#127860;</span>
-          <p>点击上传餐食照片</p>
+          <p>点击上传{{ mealTypeOptions.find(o => o.value === mealType)?.label }}照片</p>
           <span class="upload-hint">拍摄你正在吃或已吃的食物</span>
         </div>
       </div>
       <input ref="fileInputRef" type="file" accept="image/*" style="display:none" @change="onFileChange" />
       <div class="upload-actions">
-        <button class="btn btn-primary" :disabled="!selectedFile || loading" @click="doAnalyze">
+        <button class="btn btn-primary" :disabled="!selectedFile || loading" @click="doRecognize">
           {{ loading ? '识别中...' : '开始识别' }}
         </button>
       </div>
     </div>
 
-    <!-- Result -->
-    <div v-if="result" class="result-section">
+    <!-- Step 2: Recognizing -->
+    <div v-if="step === 'recognizing'" class="loading-section">
+      <div class="loading-icon">&#128270;</div>
+      <p class="loading-msg">AI 正在识别食材...</p>
+      <div class="loading-bar"><div class="loading-fill"></div></div>
+      <p class="loading-hint">Vision Model 正在分析图片，约需 10-30 秒</p>
+    </div>
+
+    <!-- Step 3: Confirm ingredients -->
+    <div v-if="step === 'confirm'" class="confirm-section">
+      <div class="confirm-header">
+        <h2>食材识别结果</h2>
+        <p>请确认食材和重量，可修改或删除。</p>
+      </div>
+
+      <!-- 预览图 -->
+      <div class="confirm-preview" v-if="previewUrl">
+        <img :src="previewUrl" alt="餐食照片" />
+      </div>
+
+      <!-- 食材列表 -->
+      <div class="ingredient-list">
+        <div
+          v-for="(item, index) in ingredients"
+          :key="index"
+          class="ingredient-card"
+        >
+          <div class="ingredient-info">
+            <input
+              v-model="item.display_name"
+              class="ingredient-name-input"
+              placeholder="食材名称"
+            />
+            <span class="confidence" v-if="item.confidence < 1">
+              置信度 {{ (item.confidence * 100).toFixed(0) }}%
+            </span>
+          </div>
+          <div class="ingredient-weight">
+            <input
+              type="number"
+              :value="item.estimated_weight_g"
+              @input="updateWeight(index, ($event.target as HTMLInputElement).value)"
+              min="1" max="5000" step="10"
+              class="weight-input"
+            />
+            <span class="weight-unit">g</span>
+          </div>
+          <button class="remove-btn" @click="removeIngredient(index)">&times;</button>
+        </div>
+      </div>
+
+      <div class="confirm-actions">
+        <button class="btn btn-secondary" @click="addIngredient">+ 添加食材</button>
+        <button class="btn btn-primary" :disabled="calculating" @click="doCalculate">
+          {{ calculating ? '计算中...' : '确认并计算热量' }}
+        </button>
+        <button class="btn btn-ghost" @click="resetCurrentMeal">重新拍照</button>
+      </div>
+    </div>
+
+    <!-- Step 4: Calculating -->
+    <div v-if="step === 'calculating'" class="loading-section">
+      <div class="loading-icon">&#127859;</div>
+      <p class="loading-msg">正在计算营养成分...</p>
+      <div class="loading-bar"><div class="loading-fill"></div></div>
+    </div>
+
+    <!-- Step 5: Result -->
+    <div v-if="step === 'result' && result" class="result-section">
       <div class="result-header">
-        <h2>{{ mealTypeOptions.find(o => o.value === mealType)?.label || '餐食' }}识别结果</h2>
+        <h2>{{ mealTypeOptions.find(o => o.value === mealType)?.label }}识别结果</h2>
       </div>
 
       <!-- Photo preview -->
@@ -235,13 +371,7 @@ function statusLabel(status: string): string {
           <span class="item-name">{{ item.dish_name }}</span>
           <span class="item-portion">{{ item.estimated_portion_g }}g</span>
           <span class="item-cal">{{ item.calories_kcal }} kcal</span>
-          <span class="item-confidence" v-if="item.confidence < 1">{{ (item.confidence * 100).toFixed(0) }}%</span>
         </div>
-      </div>
-
-      <!-- Question -->
-      <div class="question" v-if="result.question_to_user">
-        <p>{{ result.question_to_user }}</p>
       </div>
 
       <div class="result-actions">
@@ -261,9 +391,11 @@ function statusLabel(status: string): string {
 .meal-type-select { margin-bottom: var(--space-5); }
 .field-label { display: block; font-size: var(--text-sm); font-weight: 600; color: var(--color-text-primary); margin-bottom: var(--space-2); }
 .radio-group { display: flex; flex-wrap: wrap; gap: var(--space-2); }
-.radio-btn { height: 40px; padding: 0 var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); font-size: var(--text-base); font-family: var(--font-family); color: var(--color-text-secondary); cursor: pointer; transition: all var(--duration-fast) var(--ease-out); }
+.radio-btn { position: relative; height: 40px; padding: 0 var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface); font-size: var(--text-base); font-family: var(--font-family); color: var(--color-text-secondary); cursor: pointer; transition: all var(--duration-fast) var(--ease-out); }
 .radio-btn:hover { border-color: var(--color-accent); color: var(--color-text-primary); }
 .radio-btn--active { border-color: var(--color-accent); background: var(--color-accent-subtle); color: var(--color-accent); font-weight: 600; }
+.radio-btn--done { border-color: var(--color-accent); }
+.done-dot { position: absolute; top: 4px; right: 4px; width: 8px; height: 8px; border-radius: 50%; background: var(--color-accent); }
 
 .upload-section { text-align: center; }
 .upload-area { border: 2px dashed var(--color-border); border-radius: var(--radius-md); padding: var(--space-10); cursor: pointer; transition: border-color var(--duration-fast) var(--ease-out); margin-bottom: var(--space-5); }
@@ -273,6 +405,50 @@ function statusLabel(status: string): string {
 .upload-hint { font-size: var(--text-xs); color: var(--color-text-tertiary); }
 .preview img { max-width: 100%; max-height: 300px; border-radius: var(--radius-sm); }
 .upload-actions { display: flex; justify-content: center; gap: var(--space-3); }
+
+/* Loading */
+.loading-section { text-align: center; padding: var(--space-12) 0; }
+.loading-icon { font-size: 48px; margin-bottom: var(--space-4); opacity: 0.5; }
+.loading-msg { font-size: var(--text-md); font-weight: 600; color: var(--color-text-primary); margin-bottom: var(--space-4); }
+.loading-bar { height: 4px; background: var(--color-border-subtle); border-radius: 2px; overflow: hidden; max-width: 300px; margin: 0 auto var(--space-3); }
+.loading-fill { height: 100%; background: var(--color-accent); border-radius: 2px; animation: loadPulse 2s ease-in-out infinite; width: 60%; }
+@keyframes loadPulse { 0%,100% { width: 30%; } 50% { width: 80%; } }
+.loading-hint { font-size: var(--text-sm); color: var(--color-text-tertiary); }
+
+/* Confirm */
+.confirm-section { display: flex; flex-direction: column; gap: var(--space-4); }
+.confirm-header { margin-bottom: var(--space-2); }
+.confirm-header h2 { font-size: var(--text-xl); font-weight: 700; margin-bottom: var(--space-1); }
+.confirm-header p { color: var(--color-text-secondary); }
+.confirm-preview { margin-bottom: var(--space-2); }
+.confirm-preview img { max-width: 100%; max-height: 200px; border-radius: var(--radius-sm); }
+
+.ingredient-list { display: flex; flex-direction: column; gap: var(--space-3); margin-bottom: var(--space-4); }
+.ingredient-card {
+  display: flex; align-items: center; gap: var(--space-3);
+  background: var(--color-surface); border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md); padding: var(--space-3) var(--space-4);
+}
+.ingredient-info { flex: 1; display: flex; align-items: center; gap: var(--space-2); }
+.ingredient-name-input {
+  border: none; background: transparent; font-size: var(--text-base); font-weight: 600;
+  color: var(--color-text-primary); width: 120px; outline: none;
+  border-bottom: 1px solid transparent;
+}
+.ingredient-name-input:focus { border-bottom-color: var(--color-accent); }
+.confidence { font-size: var(--text-xs); color: var(--color-text-tertiary); background: var(--color-surface); padding: 1px 6px; border-radius: 4px; }
+.ingredient-weight { display: flex; align-items: center; gap: 4px; }
+.weight-input {
+  width: 70px; height: 36px; text-align: center; border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: var(--text-base);
+  color: var(--color-text-primary); background: var(--color-surface); outline: none;
+}
+.weight-input:focus { border-color: var(--color-accent); }
+.weight-unit { font-size: var(--text-sm); color: var(--color-text-tertiary); }
+.remove-btn { background: none; border: none; font-size: 18px; color: var(--color-text-tertiary); cursor: pointer; padding: 4px; }
+.remove-btn:hover { color: var(--color-danger); }
+
+.confirm-actions { display: flex; gap: var(--space-3); flex-wrap: wrap; }
 
 .result-section { display: flex; flex-direction: column; gap: var(--space-4); }
 .result-header h2 { font-size: var(--text-xl); font-weight: 700; }
@@ -315,6 +491,8 @@ function statusLabel(status: string): string {
 .btn-primary { background-color: var(--color-accent); color: white; }
 .btn-primary:hover:not(:disabled) { background-color: var(--color-accent-hover); }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-secondary { background: var(--color-surface); color: var(--color-text-secondary); border: 1px solid var(--color-border); }
+.btn-secondary:hover { border-color: var(--color-accent); color: var(--color-accent); }
 .btn-ghost { background: transparent; color: var(--color-text-secondary); border: 1px solid var(--color-border); }
 .btn-ghost:hover { border-color: var(--color-text-tertiary); }
 </style>
