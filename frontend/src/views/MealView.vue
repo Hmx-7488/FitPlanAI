@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, nextTick, useTemplateRef, watch } from 'vue'
+import { ref, computed, nextTick, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import axios from 'axios'
@@ -8,12 +8,29 @@ import gsap from 'gsap'
 
 const router = useRouter()
 const loading = ref(false)
-const selectedFile = ref<File | null>(null)
-const previewUrl = ref('')
-const result = ref<MealAnalysis | null>(null)
 const mealType = ref('lunch')
 const pageRef = useTemplateRef<HTMLElement>('pageRef')
 const fileInputRef = useTemplateRef<HTMLInputElement>('fileInputRef')
+
+// 每个餐食类型独立保存状态
+interface MealState {
+  selectedFile: File | null
+  previewUrl: string
+  result: MealAnalysis | null
+}
+
+const mealStates = ref<Record<string, MealState>>({
+  breakfast: { selectedFile: null, previewUrl: '', result: null },
+  lunch: { selectedFile: null, previewUrl: '', result: null },
+  dinner: { selectedFile: null, previewUrl: '', result: null },
+  snack: { selectedFile: null, previewUrl: '', result: null },
+})
+
+// 计算当前选中餐食类型的状态
+const currentState = computed(() => mealStates.value[mealType.value])
+const selectedFile = computed(() => currentState.value.selectedFile)
+const previewUrl = computed(() => currentState.value.previewUrl)
+const result = computed(() => currentState.value.result)
 
 function animateResult() {
   nextTick(() => {
@@ -43,9 +60,11 @@ const mealTypeOptions = [
   { value: 'snack', label: '加餐' },
 ]
 
-// 切换餐食类型时清除上传状态
+// 切换餐食类型时清空文件输入
 watch(mealType, () => {
-  reset()
+  if (fileInputRef.value) {
+    fileInputRef.value.value = ''
+  }
 })
 
 function onFileChange(e: Event) {
@@ -56,12 +75,13 @@ function onFileChange(e: Event) {
     ElMessage.warning('请选择图片文件')
     return
   }
-  selectedFile.value = file
-  previewUrl.value = URL.createObjectURL(file)
+  // 更新当前餐食类型的状态
+  mealStates.value[mealType.value].selectedFile = file
+  mealStates.value[mealType.value].previewUrl = URL.createObjectURL(file)
 }
 
 async function doAnalyze() {
-  if (!selectedFile.value) return
+  if (!currentState.value.selectedFile) return
   const userId = localStorage.getItem('userId')
   if (!userId) {
     ElMessage.warning('请先填写个人信息')
@@ -74,12 +94,12 @@ async function doAnalyze() {
     const formData = new FormData()
     formData.append('user_id', userId)
     formData.append('meal_type', mealType.value)
-    formData.append('image', selectedFile.value)
+    formData.append('image', currentState.value.selectedFile)
     const res = await axios.post('/api/meal/analyze', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 120000,
     })
-    result.value = res.data
+    mealStates.value[mealType.value].result = res.data
     ElMessage.success('识别完成')
   } catch (err: any) {
     ElMessage.error(err.response?.data?.detail || '识别失败')
@@ -88,11 +108,12 @@ async function doAnalyze() {
   }
 }
 
-function reset() {
-  selectedFile.value = null
-  previewUrl.value = ''
-  result.value = null
-  // 清空 input 的值，否则选同一个文件不会触发 change
+function resetCurrentMeal() {
+  mealStates.value[mealType.value] = {
+    selectedFile: null,
+    previewUrl: '',
+    result: null
+  }
   if (fileInputRef.value) {
     fileInputRef.value.value = ''
   }
@@ -158,7 +179,7 @@ function statusLabel(status: string): string {
     <!-- Result -->
     <div v-if="result" class="result-section">
       <div class="result-header">
-        <h2>{{ mealTypeOptions.find(o => o.value === result!.meal_type)?.label || '餐食' }}识别结果</h2>
+        <h2>{{ mealTypeOptions.find(o => o.value === mealType)?.label || '餐食' }}识别结果</h2>
       </div>
 
       <!-- Photo preview -->
@@ -224,7 +245,7 @@ function statusLabel(status: string): string {
       </div>
 
       <div class="result-actions">
-        <button class="btn btn-primary" @click="reset">再拍一张</button>
+        <button class="btn btn-primary" @click="resetCurrentMeal">再拍一张</button>
         <button class="btn btn-ghost" @click="router.push('/history')">查看历史</button>
       </div>
     </div>
