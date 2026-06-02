@@ -13,6 +13,7 @@ const previewUrl = ref('')
 const result = ref<MealAnalysis | null>(null)
 const mealType = ref('lunch')
 const pageRef = useTemplateRef<HTMLElement>('pageRef')
+const fileInputRef = useTemplateRef<HTMLInputElement>('fileInputRef')
 
 function animateResult() {
   nextTick(() => {
@@ -86,6 +87,10 @@ function reset() {
   selectedFile.value = null
   previewUrl.value = ''
   result.value = null
+  // 清空 input 的值，否则选同一个文件不会触发 change
+  if (fileInputRef.value) {
+    fileInputRef.value.value = ''
+  }
 }
 
 function statusColor(status: string): string {
@@ -127,7 +132,7 @@ function statusLabel(status: string): string {
         </div>
       </div>
 
-      <div class="upload-area" @click="($refs.fileInput as HTMLInputElement).click()">
+      <div class="upload-area" @click="fileInputRef?.click()">
         <div v-if="previewUrl" class="preview">
           <img :src="previewUrl" alt="预览" />
         </div>
@@ -137,7 +142,7 @@ function statusLabel(status: string): string {
           <span class="upload-hint">拍摄你正在吃或已吃的食物</span>
         </div>
       </div>
-      <input ref="fileInput" type="file" accept="image/*" style="display:none" @change="onFileChange" />
+      <input ref="fileInputRef" type="file" accept="image/*" style="display:none" @change="onFileChange" />
       <div class="upload-actions">
         <button class="btn btn-primary" :disabled="!selectedFile || loading" @click="doAnalyze">
           {{ loading ? '识别中...' : '开始识别' }}

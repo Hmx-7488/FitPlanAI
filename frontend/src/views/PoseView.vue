@@ -13,6 +13,7 @@ const previewUrl = ref('')
 const result = ref<(PoseAnalysis & { photo_url?: string; risk_warnings?: string[] }) | null>(null)
 const riskWarnings = ref<string[]>([])
 const pageRef = useTemplateRef<HTMLElement>('pageRef')
+const fileInputRef = useTemplateRef<HTMLInputElement>('fileInputRef')
 
 function animateResult() {
   nextTick(() => {
@@ -94,6 +95,9 @@ function reset() {
   previewUrl.value = ''
   result.value = null
   riskWarnings.value = []
+  if (fileInputRef.value) {
+    fileInputRef.value.value = ''
+  }
 }
 
 function severityColor(severity: string): string {
@@ -125,7 +129,7 @@ function severityColor(severity: string): string {
         </div>
       </div>
 
-      <div class="upload-area" @click="($refs.fileInput as HTMLInputElement).click()">
+      <div class="upload-area" @click="fileInputRef?.click()">
         <div v-if="previewUrl" class="preview">
           <img :src="previewUrl" alt="预览" />
         </div>
@@ -135,7 +139,7 @@ function severityColor(severity: string): string {
           <span class="upload-hint">建议侧面或正面拍摄，全身入镜</span>
         </div>
       </div>
-      <input ref="fileInput" type="file" accept="image/*" style="display:none" @change="onFileChange" />
+      <input ref="fileInputRef" type="file" accept="image/*" style="display:none" @change="onFileChange" />
       <div class="upload-actions">
         <button class="btn btn-primary" :disabled="!selectedFile || loading" @click="doAnalyze">
           {{ loading ? '分析中...' : '开始分析' }}

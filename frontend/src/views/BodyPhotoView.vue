@@ -12,6 +12,7 @@ const selectedFile = ref<File | null>(null)
 const previewUrl = ref('')
 const result = ref<BodyPhotoAnalysis | null>(null)
 const pageRef = useTemplateRef<HTMLElement>('pageRef')
+const fileInputRef = useTemplateRef<HTMLInputElement>('fileInputRef')
 
 function animateResult() {
   nextTick(() => {
@@ -80,7 +81,7 @@ function reset() {
 
     <!-- Upload -->
     <div v-if="!result" class="upload-section">
-      <div class="upload-area" @click="($refs.fileInput as HTMLInputElement).click()">
+      <div class="upload-area" @click="fileInputRef?.click()">
         <div v-if="previewUrl" class="preview">
           <img :src="previewUrl" alt="预览" />
         </div>

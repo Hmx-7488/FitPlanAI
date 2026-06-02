@@ -8,6 +8,7 @@ import gsap from 'gsap'
 
 const router = useRouter()
 const pageRef = useTemplateRef<HTMLElement>('pageRef')
+const fileInputRef = useTemplateRef<HTMLInputElement>('fileInputRef')
 
 // 状态：upload | recognizing | confirm | generating | result
 const step = ref<'upload' | 'recognizing' | 'confirm' | 'generating' | 'result'>('upload')
@@ -129,6 +130,9 @@ function resetAll() {
   recognition.value = null
   editableIngredients.value = []
   recipes.value = null
+  if (fileInputRef.value) {
+    fileInputRef.value.value = ''
+  }
 }
 
 function formatRecipe(text: string): string {
@@ -162,7 +166,7 @@ onMounted(async () => {
 
     <!-- Step 1: Upload -->
     <div v-if="step === 'upload'" class="upload-section">
-      <div class="upload-area" @click="($refs.fileInput as HTMLInputElement).click()">
+      <div class="upload-area" @click="fileInputRef?.click()">
         <div v-if="previewUrl" class="preview">
           <img :src="previewUrl" alt="预览" />
         </div>
@@ -173,7 +177,7 @@ onMounted(async () => {
         </div>
       </div>
       <input
-        ref="fileInput"
+        ref="fileInputRef"
         type="file"
         accept="image/*"
         style="display: none"
