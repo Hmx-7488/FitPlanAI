@@ -269,6 +269,20 @@ onMounted(async () => {
             <span v-for="ing in r.ingredients" :key="ing" class="recipe-ing">{{ ing }}</span>
           </div>
           <p class="recipe-steps">{{ r.steps }}</p>
+          <!-- 替代食材 -->
+          <div v-if="r.substitute_ingredients?.length" class="recipe-substitutes">
+            <h4 class="sub-title">替代建议</h4>
+            <div v-for="sub in r.substitute_ingredients" :key="sub.missing" class="sub-item">
+              <span class="sub-missing">{{ sub.missing }}</span>
+              <span class="sub-arrow">→</span>
+              <span v-for="alt in sub.alternatives" :key="alt" class="sub-alt">{{ alt }}</span>
+            </div>
+          </div>
+          <!-- 购物清单 -->
+          <div v-if="r.shopping_list?.length" class="recipe-shopping">
+            <span class="shopping-label">需要购买：</span>
+            <span v-for="item in r.shopping_list" :key="item" class="shopping-item">{{ item }}</span>
+          </div>
         </div>
       </div>
 
@@ -387,6 +401,17 @@ onMounted(async () => {
 .recipe-ingredients { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-3); }
 .recipe-ing { font-size: var(--text-xs); padding: 2px 8px; background: var(--color-surface); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-sm); color: var(--color-text-secondary); }
 .recipe-steps { font-size: var(--text-sm); color: var(--color-text-secondary); line-height: var(--leading-relaxed); }
+
+.recipe-substitutes { margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--color-border-subtle); }
+.sub-title { font-size: var(--text-xs); font-weight: 700; color: var(--color-text-tertiary); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: var(--space-2); }
+.sub-item { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-1); font-size: var(--text-sm); }
+.sub-missing { color: var(--color-warning); font-weight: 600; }
+.sub-arrow { color: var(--color-text-tertiary); }
+.sub-alt { padding: 1px 6px; background: oklch(0.93 0.04 145); color: oklch(0.40 0.12 145); border-radius: var(--radius-sm); font-size: var(--text-xs); font-weight: 500; }
+
+.recipe-shopping { margin-top: var(--space-2); font-size: var(--text-sm); }
+.shopping-label { color: var(--color-text-tertiary); }
+.shopping-item { display: inline-block; margin-left: var(--space-1); padding: 1px 6px; background: oklch(0.93 0.06 25); color: oklch(0.45 0.14 25); border-radius: var(--radius-sm); font-size: var(--text-xs); font-weight: 600; }
 
 .full-recipe {
   background: var(--color-surface); border: 1px solid var(--color-border-subtle);

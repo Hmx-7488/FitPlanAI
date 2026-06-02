@@ -236,7 +236,7 @@ def _parse_recipes(content: str, ingredients: list[IngredientItem]) -> list[Reci
 
 
 def _build_recipe(name: str, lines: list[str], ingredients: list[IngredientItem]) -> RecipeItem:
-    """构建单个菜谱项（含图片信息）"""
+    """构建单个菜谱项（含图片信息、替代食材和购物清单）"""
     full_text = "\n".join(lines)
 
     calories = 0
@@ -296,9 +296,35 @@ def _build_recipe(name: str, lines: list[str], ingredients: list[IngredientItem]
         generation_prompt=generation_prompt,
     )
 
+    # 食材缺口分析：识别菜谱中提到但用户没有的食材
+    available_names = {ing.display_name for ing in ingredients}
+    missing = []
+    substitutes = []
+    shopping = []
+    # 常见食材的替代建议映射
+    common_missing_map = {
+        "西兰花": ["菠菜", "生菜", "黄瓜"],
+        "鸡胸肉": ["鸡腿肉", "瘦牛肉", "豆腐"],
+        "糙米": ["白米", "红薯", "燕麦"],
+        "三文鱼": ["鲈鱼", "鳕鱼", "虾仁"],
+        "牛油果": ["橄榄油", "坚果"],
+    }
+    for common_ingredient, alternatives in common_missing_map.items():
+        if common_ingredient in full_text and common_ingredient not in available_names:
+            missing.append(common_ingredient)
+            from app.schemas.vision import SubstituteItem
+            substitutes.append(SubstituteItem(
+                missing=common_ingredient,
+                alternatives=alternatives[:2],
+            ))
+            shopping.append(common_ingredient)
+
     return RecipeItem(
         name=name, ingredients=used,
         calories_est=calories or 300, protein_est=protein or 20.0,
         carbs_est=carbs or 30.0, fat_est=fat or 10.0,
         steps=steps, image=image,
+        missing_ingredients=missing,
+        substitute_ingredients=substitutes,
+        shopping_list=shopping,
     )

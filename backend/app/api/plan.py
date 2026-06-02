@@ -36,6 +36,8 @@ async def get_latest_plan(
             tdee=calorie_info.get("tdee", 0),
             target_calories=calorie_info.get("target_calories", plan.daily_calorie_target),
             deficit=calorie_info.get("deficit", 0),
+            goal_type=calorie_info.get("goal_type", "fat_loss"),
+            strategy=calorie_info.get("strategy", "calorie_deficit"),
         ),
         macros=MacrosInfo(
             protein_g=macros.get("protein_g", 0),

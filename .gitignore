@@ -41,3 +41,6 @@ frontend/dist/
 
 echo docs/ClaudeCode分阶段实现指令.md >> .gitignore
 echo docs/Boss直聘AI岗位调研与FitPlanAI简历项目包装.md >> .gitignore
+
+# 上传文件（用户数据）
+backend/data/uploads/

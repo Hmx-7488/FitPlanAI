@@ -27,6 +27,17 @@ async def generate_plan(
         "forbidden_foods": json.loads(user.forbidden_foods),
         "injuries": json.loads(user.injuries),
         "allergies": json.loads(user.allergies),
+        # 训练条件
+        "training_days_per_week": user.training_days_per_week,
+        "session_duration_minutes": user.session_duration_minutes,
+        "training_location": user.training_location,
+        "equipment": json.loads(user.equipment) if user.equipment else [],
+        "training_experience": user.training_experience,
+        "preferred_training_time": user.preferred_training_time,
+        # 中国饮食习惯
+        "region_preference": user.region_preference,
+        "meal_scenario": user.meal_scenario,
+        "prep_time_limit_minutes": user.prep_time_limit_minutes,
     }
 
     # 执行LangGraph工作流

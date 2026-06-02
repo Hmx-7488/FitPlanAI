@@ -93,9 +93,9 @@ def check_profile(state: AgentState) -> dict:
     if weight > 200:
         warnings.append(f"体重 {weight}kg 偏高，请确认")
 
-    # 选填但建议补充的字段
+    # 选填但建议补充的字段（加入 warnings 而非 missing，不阻塞计划生成）
     if profile.get("body_fat_rate") is None:
-        missing.append("体脂率（选填，但能让计划更精准）")
+        warnings.append("体脂率未填写，计划将基于 BMI 估算，补充后更精准")
     if not profile.get("activity_level"):
         missing.append("活动水平")
     if not profile.get("diet_preference"):
@@ -202,7 +202,7 @@ def calc_calorie_node(state: AgentState) -> dict:
 
 
 def generate_meal_plan(state: AgentState) -> dict:
-    """生成饮食建议，根据目标类型分支"""
+    """生成饮食建议，根据目标类型和饮食习惯分支"""
     llm = get_llm(max_tokens=1500)
     profile = state["user_profile"]
     macros = state["macros"]
@@ -213,6 +213,31 @@ def generate_meal_plan(state: AgentState) -> dict:
 
     forbidden = ", ".join(profile.get("forbidden_foods", [])) or "无"
     preference = profile.get("diet_preference", "balanced")
+
+    # 中国饮食习惯字段
+    region_map = {
+        "south_china": "南方口味",
+        "north_china": "北方口味",
+        "sichuan": "川湘口味",
+        "cantonese": "粤式口味",
+        "balanced": "不限地域",
+    }
+    scenario_map = {
+        "home_cooking": "自己做饭",
+        "takeout": "点外卖为主",
+        "canteen": "食堂为主",
+        "convenience_store": "便利店为主",
+    }
+    region = region_map.get(profile.get("region_preference", "balanced"), "不限地域")
+    scenario = scenario_map.get(profile.get("meal_scenario", "home_cooking"), "自己做饭")
+    prep_time = profile.get("prep_time_limit_minutes", 30)
+
+    diet_context = ""
+    if region != "不限地域" or scenario != "自己做饭":
+        diet_context = f"""
+饮食习惯：{region}，{scenario}，备餐时间限制{prep_time}分钟。
+要求：菜谱要贴近{scenario}的场景。如果备餐时间短（{prep_time}分钟以内），优先推荐快手菜。
+如果用户主要吃外卖/食堂/便利店，给出具体点餐建议（如"食堂两荤一素，少油少汁"、"外卖选轻食沙拉或少油盖饭"）。"""
 
     if goal_type == "muscle_gain":
         goal_desc = f"""用户目标：增肌。每日热量盈余约{abs(calorie_info['deficit'])}kcal，蛋白质需求高（{macros['protein_g']}g）。
@@ -230,6 +255,7 @@ def generate_meal_plan(state: AgentState) -> dict:
 每日目标：热量{calorie_info['target_calories']}kcal，蛋白{macros['protein_g']}g，碳水{macros['carbs_g']}g，脂肪{macros['fat_g']}g
 
 {goal_desc}
+{diet_context}
 
 参考知识：
 {food_knowledge[:500]}
@@ -250,39 +276,75 @@ def generate_meal_plan(state: AgentState) -> dict:
 
 
 def generate_workout_plan(state: AgentState) -> dict:
-    """生成运动建议，根据目标类型分支"""
+    """生成运动建议，根据目标类型和训练条件分支"""
     llm = get_llm(max_tokens=1200)
     profile = state["user_profile"]
     exercise_knowledge = state["exercise_knowledge"]
     calorie_info = state["calorie_info"]
     goal_type = state.get("goal_type", "fat_loss")
 
+    # 训练条件字段
+    training_days = profile.get("training_days_per_week", 3)
+    session_duration = profile.get("session_duration_minutes", 60)
+    location = profile.get("training_location", "gym")
+    equipment = profile.get("equipment", [])
+    experience = profile.get("training_experience", "beginner")
+    preferred_time = profile.get("preferred_training_time", "evening")
+
+    location_map = {"gym": "健身房", "home": "家里", "outdoor": "户外"}
+    experience_map = {"beginner": "新手", "intermediate": "有训练基础", "advanced": "进阶训练者"}
+    time_map = {"morning": "早上", "afternoon": "下午", "evening": "晚上"}
+
+    location_text = location_map.get(location, "健身房")
+    experience_text = experience_map.get(experience, "新手")
+    time_text = time_map.get(preferred_time, "晚上")
+    equipment_text = "、".join(equipment) if equipment else (
+        "哑铃、弹力带" if location == "home" else "健身房器械" if location == "gym" else "徒手"
+    )
+
+    training_context = f"""
+训练条件：每周{training_days}天，每次{session_duration}分钟，{location_text}，偏好{time_text}训练
+训练经验：{experience_text}
+可用器械：{equipment_text}"""
+
+    if location == "home":
+        training_context += "\n注意：用户在家训练，优先推荐徒手动作和简单器械动作，避免需要大型器械的动作。"
+    if experience == "beginner":
+        training_context += "\n注意：用户是新手，动作选择要基础安全，附带简短的动作要点说明。"
+    elif experience == "advanced":
+        training_context += "\n注意：用户有训练经验，可以安排更复杂的动作和更高的训练强度。"
+
     if goal_type == "muscle_gain":
-        goal_desc = """用户目标：增肌。
+        goal_desc = f"""用户目标：增肌。
 训练策略：
 - 以力量训练和肌肥大训练为主，按胸/背/腿/肩/手臂或推拉腿拆分
 - 强调渐进超负荷，输出动作、组数、次数、RPE建议、进阶方式
 - 有氧只作为心肺和恢复辅助，每周1-2次，每次20-30分钟
-- 训练容量充足，每个肌群每周12-20组"""
+- 训练容量充足，每个肌群每周12-20组
+- 根据每周{training_days}天合理分配肌群"""
     else:
-        goal_desc = """用户目标：减脂。
+        goal_desc = f"""用户目标：减脂。
 训练策略：
 - 力量训练用于保留肌肉，中等强度
 - 有氧训练增加消耗，每周3-4次，每次30-40分钟中低强度
 - 控制训练容量，避免热量缺口下恢复不足
-- 力量和有氧可以安排在同一天或交替"""
+- 力量和有氧可以安排在同一天或交替
+- 根据每周{training_days}天合理安排力量和有氧"""
+    if session_duration <= 45:
+        goal_desc += f"\n注意：每次训练只有{session_duration}分钟，要精简高效，力量和有氧紧凑安排。"
 
     prompt = f"""你是健身教练。根据以下信息生成一周训练计划。
 
 用户：{profile['gender']}，{profile['age']}岁，{profile['weight']}kg→目标{profile['target_weight']}kg
 活动水平：{profile.get('activity_level', 'medium')}，每日热量目标：{calorie_info['target_calories']}kcal
+{training_context}
 
 {goal_desc}
 
 运动参考：
 {exercise_knowledge[:500]}
 
-输出格式（按天列出）：
+输出格式（按{training_days}天列出，训练日用周一/周二等标记，休息日标注"休息"）：
 **周一** 力量（上肢）：动作1 组数x次数 / 动作2 ... / 有氧 时长
 **周二** 有氧：...
 ...

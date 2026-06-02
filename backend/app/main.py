@@ -8,6 +8,10 @@ from app.api.profile import router as profile_router
 from app.api.plan import router as plan_router
 from app.api.checkin import router as checkin_router
 from app.api.vision import router as vision_router
+from app.api.body import router as body_router
+from app.api.pose import router as pose_router
+from app.api.meal import router as meal_router
+from app.api.dashboard import router as dashboard_router
 
 UPLOAD_DIR = Path(__file__).parent.parent / "data" / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -22,7 +26,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="FitPlanAI",
     description="基于 LLM + LangGraph + RAG 的个性化减脂/增肌 AI Agent",
-    version="0.4.0",
+    version="0.6.0",
     lifespan=lifespan,
 )
 
@@ -38,6 +42,10 @@ app.include_router(profile_router, prefix="/api/profile", tags=["用户信息"])
 app.include_router(plan_router, prefix="/api/plan", tags=["减脂计划"])
 app.include_router(checkin_router, prefix="/api/checkin", tags=["每日打卡"])
 app.include_router(vision_router, prefix="/api/vision", tags=["食材识别"])
+app.include_router(body_router, prefix="/api/body", tags=["身材照片分析"])
+app.include_router(pose_router, prefix="/api/pose", tags=["动作分析"])
+app.include_router(meal_router, prefix="/api/meal", tags=["餐食热量识别"])
+app.include_router(dashboard_router, prefix="/api/dashboard", tags=["Dashboard"])
 
 # 静态文件：上传的图片
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
@@ -45,4 +53,4 @@ app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 @app.get("/")
 async def root():
-    return {"message": "FitPlanAI API", "version": "0.4.0"}
+    return {"message": "FitPlanAI API", "version": "0.6.0"}

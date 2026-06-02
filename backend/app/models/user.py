@@ -20,6 +20,17 @@ class User(Base):
     forbidden_foods: Mapped[str] = mapped_column(Text, default="[]")
     injuries: Mapped[str] = mapped_column(Text, default="[]")
     allergies: Mapped[str] = mapped_column(Text, default="[]")
+    # 训练条件字段
+    training_days_per_week: Mapped[int] = mapped_column(Integer, default=3)
+    session_duration_minutes: Mapped[int] = mapped_column(Integer, default=60)
+    training_location: Mapped[str] = mapped_column(String(20), default="gym")  # gym / home / outdoor
+    equipment: Mapped[str] = mapped_column(Text, default="[]")  # JSON array
+    training_experience: Mapped[str] = mapped_column(String(20), default="beginner")  # beginner / intermediate / advanced
+    preferred_training_time: Mapped[str] = mapped_column(String(20), default="morning")  # morning / afternoon / evening
+    # 中国饮食习惯字段
+    region_preference: Mapped[str] = mapped_column(String(30), default="balanced")  # south_china / north_china / sichuan / cantonese / balanced
+    meal_scenario: Mapped[str] = mapped_column(String(30), default="home_cooking")  # home_cooking / takeout / canteen / convenience_store
+    prep_time_limit_minutes: Mapped[int] = mapped_column(Integer, default=30)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -72,4 +83,18 @@ class Recipe(Base):
     recognition_id: Mapped[int] = mapped_column(Integer)
     recipe_content: Mapped[str] = mapped_column(Text, default="")  # LLM 生成的菜谱文本
     nutrition_json: Mapped[str] = mapped_column(Text, default="{}")  # 营养成分估算
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class MealLog(Base):
+    """餐食热量识别记录"""
+    __tablename__ = "meal_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer)
+    date: Mapped[str] = mapped_column(String(10))  # YYYY-MM-DD
+    meal_type: Mapped[str] = mapped_column(String(20), default="lunch")  # breakfast / lunch / dinner / snack
+    image_path: Mapped[str] = mapped_column(Text, default="")
+    items_json: Mapped[str] = mapped_column(Text, default="[]")  # 识别的菜品列表
+    meal_total_json: Mapped[str] = mapped_column(Text, default="{}")  # 本餐总营养
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

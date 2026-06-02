@@ -41,6 +41,12 @@ class RecipeImage(BaseModel):
     generation_prompt: str = ""  # 图片生成提示词
 
 
+class SubstituteItem(BaseModel):
+    """替代食材"""
+    missing: str
+    alternatives: list[str]
+
+
 class RecipeItem(BaseModel):
     name: str                # 菜名
     ingredients: list[str]   # 所用食材
@@ -50,6 +56,9 @@ class RecipeItem(BaseModel):
     fat_est: float = 0       # 估算脂肪(g)
     steps: str               # 做法简述
     image: RecipeImage = RecipeImage()  # 菜谱图片
+    missing_ingredients: list[str] = []  # 缺少的食材
+    substitute_ingredients: list[SubstituteItem] = []  # 替代食材建议
+    shopping_list: list[str] = []  # 购物清单
 
 
 class RecipeResponse(BaseModel):

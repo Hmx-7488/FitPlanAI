@@ -38,6 +38,21 @@ const router = createRouter({
       name: 'food',
       component: () => import('../views/FoodView.vue'),
     },
+    {
+      path: '/body-photo',
+      name: 'body-photo',
+      component: () => import('../views/BodyPhotoView.vue'),
+    },
+    {
+      path: '/pose',
+      name: 'pose',
+      component: () => import('../views/PoseView.vue'),
+    },
+    {
+      path: '/meal',
+      name: 'meal',
+      component: () => import('../views/MealView.vue'),
+    },
   ],
 })
 

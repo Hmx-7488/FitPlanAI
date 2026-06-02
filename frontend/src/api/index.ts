@@ -7,7 +7,6 @@ import type {
   CheckinResponse,
   ReviewResponse,
   RecognizeResponse,
-  ConfirmRequest,
   RecipeResponse,
   IngredientItem,
 } from '../types'
@@ -26,6 +25,29 @@ export async function createProfile(data: UserProfile): Promise<UserProfileRespo
 export async function getProfile(userId: number): Promise<UserProfileResponse> {
   const res = await api.get<UserProfileResponse>(`/profile/${userId}`)
   return res.data
+}
+
+export async function updateProfile(userId: number, data: Partial<UserProfile>): Promise<UserProfileResponse> {
+  const res = await api.patch<UserProfileResponse>(`/profile/${userId}`, data)
+  return res.data
+}
+
+export async function estimateBodyFat(userId: number, imageFile: File) {
+  const formData = new FormData()
+  formData.append('image', imageFile)
+  const res = await api.post(`/profile/${userId}/estimate-body-fat`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000,
+  })
+  return res.data as {
+    photo_url: string
+    body_fat_estimate: number
+    body_fat_range: string
+    training_focus: string[]
+    nutrition_suggestion: string
+    note: string
+    auto_filled: boolean
+  }
 }
 
 // 减脂计划
@@ -107,4 +129,73 @@ export async function getLatestRecipe(userId: number): Promise<RecipeResponse | 
   } catch {
     return null
   }
+}
+
+// Dashboard 聚合数据
+export interface DashboardData {
+  profile: {
+    id: number
+    gender: string
+    age: number
+    height: number
+    weight: number
+    target_weight: number
+    goal_type: string
+    body_fat_rate?: number
+  }
+  latest_plan: {
+    id: number
+    daily_calorie_target: number
+    protein_g: number
+    carbs_g: number
+    fat_g: number
+    summary: string
+    created_at?: string
+  } | null
+  meal_summary: {
+    date: string
+    target_kcal: number
+    consumed_kcal: number
+    remaining_kcal: number
+    progress_pct: number
+    meal_count: number
+    consumed_protein: number
+    consumed_carbs: number
+    consumed_fat: number
+  }
+  checkin_summary: {
+    streak: number
+    total_days: number
+    latest_weight: number
+    weight_change: number
+    today_checked: boolean
+  }
+}
+
+export async function getDashboard(userId: number): Promise<DashboardData> {
+  const res = await api.get<DashboardData>(`/dashboard/${userId}`)
+  return res.data
+}
+
+// 身材照片分析
+export async function analyzeBodyPhoto(userId: number, imageFile: File) {
+  const formData = new FormData()
+  formData.append('user_id', String(userId))
+  formData.append('image', imageFile)
+  const res = await api.post('/body/analyze', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return res.data
+}
+
+// AI 动作分析
+export async function analyzePose(userId: number, imageFile: File, movementName: string) {
+  const formData = new FormData()
+  formData.append('user_id', String(userId))
+  formData.append('image', imageFile)
+  formData.append('movement_name', movementName)
+  const res = await api.post('/pose/analyze', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return res.data
 }

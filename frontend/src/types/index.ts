@@ -1,5 +1,11 @@
 export type GoalType = 'fat_loss' | 'muscle_gain'
 
+export type TrainingLocation = 'gym' | 'home' | 'outdoor'
+export type TrainingExperience = 'beginner' | 'intermediate' | 'advanced'
+export type PreferredTrainingTime = 'morning' | 'afternoon' | 'evening'
+export type RegionPreference = 'south_china' | 'north_china' | 'sichuan' | 'cantonese' | 'balanced'
+export type MealScenario = 'home_cooking' | 'takeout' | 'canteen' | 'convenience_store'
+
 export interface UserProfile {
   gender: 'male' | 'female'
   age: number
@@ -13,6 +19,17 @@ export interface UserProfile {
   forbidden_foods: string[]
   injuries: string[]
   allergies: string[]
+  // 训练条件
+  training_days_per_week: number
+  session_duration_minutes: number
+  training_location: TrainingLocation
+  equipment: string[]
+  training_experience: TrainingExperience
+  preferred_training_time: PreferredTrainingTime
+  // 中国饮食习惯
+  region_preference: RegionPreference
+  meal_scenario: MealScenario
+  prep_time_limit_minutes: number
 }
 
 export interface UserProfileResponse extends UserProfile {
@@ -120,6 +137,9 @@ export interface RecipeItem {
   fat_est: number
   steps: string
   image: RecipeImage
+  missing_ingredients: string[]
+  substitute_ingredients: { missing: string; alternatives: string[] }[]
+  shopping_list: string[]
 }
 
 export interface RecipeResponse {
@@ -131,4 +151,75 @@ export interface RecipeResponse {
   total_protein: number
   recipe_content: string
   created_at?: string
+}
+
+// 身材照片分析
+export interface BodyPhotoAnalysis {
+  analysis_id: string
+  photo_url?: string
+  quality_check: {
+    is_usable: boolean
+    lighting: string
+    pose: string
+  }
+  body_fat_estimate: {
+    estimated_range: string
+    confidence: number
+    note?: string
+  }
+  training_focus: string[]
+  nutrition_suggestion: string
+  auto_filled?: boolean
+  is_ai_analysis?: boolean
+}
+
+// AI 动作分析
+export interface PoseAnalysis {
+  analysis_id: string
+  movement_name: string
+  score: number
+  issues: {
+    type: string
+    severity: string
+    description: string
+    suggestion: string
+  }[]
+  coach_cues: string[]
+  risk_warnings?: string[]
+  is_ai_analysis?: boolean
+}
+
+// 餐食热量识别
+export interface MealItem {
+  dish_name: string
+  estimated_portion_g: number
+  calories_kcal: number
+  protein_g: number
+  carbs_g: number
+  fat_g: number
+  confidence: number
+  need_confirm: boolean
+}
+
+export interface DailySummary {
+  daily_target_kcal: number
+  estimated_tdee_kcal: number
+  consumed_kcal: number
+  remaining_target_kcal: number
+  current_deficit_kcal: number
+  status: string
+  suggestion: string
+}
+
+export interface MealAnalysis {
+  meal_type: string
+  items: MealItem[]
+  meal_total: {
+    calories_kcal: number
+    protein_g: number
+    carbs_g: number
+    fat_g: number
+  }
+  daily_summary: DailySummary
+  question_to_user: string
 }
