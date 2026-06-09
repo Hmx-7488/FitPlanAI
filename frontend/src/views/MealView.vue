@@ -1,6 +1,6 @@
 <script setup lang="ts">
 defineOptions({ name: 'MealView' })
-import { ref, computed, nextTick, onMounted, useTemplateRef, watch } from 'vue'
+import { ref, computed, nextTick, onActivated, onMounted, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { recognizeMeal, calculateMeal, getMealDailySummary } from '../api'
@@ -65,6 +65,11 @@ function animateResult() {
 }
 
 watch(result, (val) => { if (val) animateResult() })
+
+// keep-alive reactivation：重新播放结果动画
+onActivated(() => {
+  if (result.value) animateResult()
+})
 
 const mealTypeOptions = [
   { value: 'breakfast', label: '早餐' },

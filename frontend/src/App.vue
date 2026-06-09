@@ -30,7 +30,10 @@ function onEnter(el: Element, done: () => void) {
 }
 
 function onLeave(el: Element, done: () => void) {
-  gsap.to(el, { y: -10, opacity: 0, duration: 0.2, ease: 'power2.in', onComplete: done })
+  // 清除 GSAP 入场残留的 inline style，让 CSS v-leave-* 接管
+  gsap.killTweensOf(el)
+  gsap.set(el, { clearProps: 'y,opacity' })
+  done()
 }
 </script>
 
@@ -58,7 +61,7 @@ function onLeave(el: Element, done: () => void) {
     </header>
     <main class="app-main">
       <router-view v-slot="{ Component }">
-        <transition @enter="onEnter" @leave="onLeave" mode="out-in" :css="false">
+        <transition name="page" @enter="onEnter" @leave="onLeave" mode="out-in">
           <keep-alive :include="cachedViews">
             <component :is="Component" />
           </keep-alive>
@@ -67,6 +70,16 @@ function onLeave(el: Element, done: () => void) {
     </main>
   </div>
 </template>
+
+<style>
+/* 非 scoped：transition class 作用于子组件 DOM */
+.page-leave-active {
+  transition: opacity 0.2s ease-in;
+}
+.page-leave-to {
+  opacity: 0;
+}
+</style>
 
 <style scoped>
 .app-shell {
