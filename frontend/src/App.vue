@@ -2,6 +2,9 @@
 import { onMounted, useTemplateRef } from 'vue'
 import gsap from 'gsap'
 
+// 跨导航保持状态的视图：分析过程中切换 tab 不丢失进度
+const cachedViews: string[] = ['BodyPhotoView', 'PoseView', 'MealView']
+
 const headerRef = useTemplateRef<HTMLElement>('headerRef')
 
 onMounted(() => {
@@ -56,7 +59,9 @@ function onLeave(el: Element, done: () => void) {
     <main class="app-main">
       <router-view v-slot="{ Component }">
         <transition @enter="onEnter" @leave="onLeave" mode="out-in" :css="false">
-          <component :is="Component" />
+          <keep-alive :include="cachedViews">
+            <component :is="Component" />
+          </keep-alive>
         </transition>
       </router-view>
     </main>
