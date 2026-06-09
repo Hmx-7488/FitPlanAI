@@ -1,122 +1,122 @@
-# SlimAgent Project Instructions
+# SlimAgent 项目说明
 
 @.claude/user.md
 @.claude/soul.md
 
-## Project
+## 项目概况
 
-SlimAgent is a Chinese-language fitness and nutrition application.
+SlimAgent 是一款中文健身与营养管理应用。
 
-- Backend: FastAPI, SQLAlchemy async, SQLite, LangGraph, LangChain.
-- Frontend: Vue 3, TypeScript, Vite, Element Plus, GSAP.
-- AI: Alibaba Cloud DashScope compatible API.
-- Text model: `qwen-plus`.
-- Vision model: `qwen-vl-plus`.
-- Image generation: DashScope Wanx.
-- User-facing communication and product copy: Simplified Chinese.
-- Internal instructions, plans, code comments, and agent coordination: English.
+- 后端：FastAPI、SQLAlchemy async、SQLite、LangGraph、LangChain。
+- 前端：Vue 3、TypeScript、Vite、Element Plus、GSAP。
+- AI：阿里云 DashScope 兼容 API。
+- 文本模型：`qwen-plus`。
+- 视觉模型：`qwen-vl-plus`。
+- 图片生成：DashScope Wanx。
+- 与用户沟通和产品文案使用简体中文。
+- 项目协作说明和 Agent 协调优先使用中文；代码标识、命令、路径和必要的技术术语保留英文。
 
-## Operating Mode
+## 工作模式
 
-Use Claude Code Agent Teams in WSL with `in-process` display mode for substantial work.
-The lead owns decomposition, file ownership, integration, final review, and acceptance.
+较复杂的任务使用 WSL 中的 Claude Code Agent Teams，并采用 `in-process` 显示模式。
+Lead 负责任务拆解、文件归属、集成、最终审查和验收。
 
-Before feature development:
+开始功能开发前：
 
-1. Inspect `git status`, recent commits, project structure, and relevant tests.
-2. Audit the current implementation and reproduce reported issues.
-3. Fix confirmed defects before extending the same feature area.
-4. Preserve unrelated user changes and untracked media.
+1. 检查 `git status`、最近提交、项目结构和相关测试。
+2. 审查当前实现并复现已报告的问题。
+3. 扩展同一功能模块前，先修复已经确认的缺陷。
+4. 保留无关的用户修改和未跟踪媒体文件。
 
-## Team Protocol
+## 团队协作规则
 
-- Lead assigns every task and explicitly owns the final merge decision.
-- Two teammates must never edit the same file concurrently.
-- Lead assigns exactly one owner for database schema, shared TypeScript/Python types, and core configuration.
-- Backend owns FastAPI, SQLAlchemy, database behavior, LangGraph, and backend tests.
-- Frontend owns Vue, TypeScript, interaction behavior, accessibility, and responsive layout.
-- AI/Vision owns DashScope integration, multimodal payloads, prompts, response parsing, and model fallbacks.
-- QA/Reviewer reviews and tests by default. QA must notify Lead before making a fix and may edit only after Lead assigns ownership.
-- Teammates report changed files, tests run, failures, and residual risks to Lead.
-- Lead resolves cross-role contracts before parallel implementation begins.
+- Lead 分配所有任务，并明确负责最终合并决策。
+- 两个 teammate 绝不能同时修改同一个文件。
+- 数据库 schema、共享 TypeScript/Python 类型和核心配置必须由 Lead 指定唯一负责人。
+- Backend 负责 FastAPI、SQLAlchemy、数据库行为、LangGraph 和后端测试。
+- Frontend 负责 Vue、TypeScript、交互行为、无障碍和响应式布局。
+- AI/Vision 负责 DashScope 集成、多模态请求、提示词、响应解析和模型降级。
+- QA/Reviewer 默认只负责审查和测试。QA 修复问题前必须通知 Lead，且只能在 Lead 分配文件归属后修改。
+- teammate 向 Lead 汇报修改文件、执行的测试、失败情况和剩余风险。
+- 开始并行实现前，由 Lead 解决跨角色接口和数据契约问题。
 
-## Autonomy
+## 自主权限
 
-Agents may autonomously:
+Agent 可以自主执行：
 
-- Read and modify project code.
-- Install required dependencies.
-- Run tests and builds.
-- Start local development services.
-- Create Git branches using a clear task-oriented name.
-- Modify database schemas after Lead assigns one owner and defines a migration/data-preservation plan.
-- Decide UI details, API fields, and prompts when requirements leave them open.
-- Create local commits after the verification gate below.
+- 读取和修改项目代码。
+- 安装所需依赖。
+- 运行测试和构建。
+- 启动本地开发服务。
+- 使用清晰、面向任务的名称创建 Git 分支。
+- 在 Lead 指定唯一负责人并确定迁移与数据保留方案后，修改数据库 schema。
+- 当需求没有明确限制时，自主决定 UI 细节、API 字段和提示词。
+- 通过下方验证门禁后创建本地提交。
 
-Do not automatically push, open a PR, merge, or change remote state. Ask the user first.
+不得自动 push、创建 PR、执行 merge 或修改远程状态，必须先询问用户。
 
-## High-Risk Confirmation Boundary
+## 高风险操作确认边界
 
-Ask the user immediately before:
+执行以下操作前必须立即询问用户：
 
-- `git reset --hard`, force push, destructive rebases, or history rewrites.
-- Deleting databases, uploaded user data, vector stores, or clearing database tables.
-- Recursive deletion of a broad directory or removal outside the repository.
-- Destructive schema migration without a verified backup or migration path.
-- Any operation that could irreversibly discard user work or external data.
+- `git reset --hard`、force push、破坏性 rebase 或重写提交历史。
+- 删除数据库、用户上传数据、向量存储，或清空数据库表。
+- 递归删除大范围目录，或删除项目仓库之外的内容。
+- 在没有验证备份或迁移路径时执行破坏性 schema 迁移。
+- 任何可能不可逆地丢弃用户工作或外部数据的操作。
 
-## Secrets
+## 密钥与敏感信息
 
-- Never print, echo, log, commit, summarize, or partially reveal API keys or tokens.
-- It is acceptable to check whether a variable exists or is configured.
-- Do not read `.env` into the conversation or include its values in command output.
-- Prefer `.env.example` for configuration documentation.
-- Redact secrets completely; do not expose prefixes or suffixes.
+- 绝不能打印、回显、记录、提交、总结或部分泄露 API Key 和 token。
+- 可以检查变量是否存在或是否已配置。
+- 不得把 `.env` 内容读入对话，也不得在命令输出中包含其中的值。
+- 配置说明优先使用 `.env.example`。
+- 敏感信息必须完整隐藏，不得暴露前缀或后缀。
 
-## Engineering Rules
+## 工程规则
 
-- Read the relevant code before editing.
-- Use existing project patterns and keep changes scoped.
-- Find the root cause before fixing a bug.
-- Validate files by content, not only by extension or client-provided MIME type.
-- Treat LLM output as untrusted input: parse structured data, validate ranges, escape rendered HTML, and provide explicit fallbacks.
-- Preserve Chinese text as UTF-8.
-- Avoid silent exception handling. Log actionable context without secrets or full image payloads.
-- Keep API contracts synchronized with frontend types.
-- For schema changes, document compatibility and preserve existing data.
+- 修改前先阅读相关代码。
+- 沿用项目现有模式，并控制修改范围。
+- 修复缺陷前先找到根本原因。
+- 根据文件真实内容进行验证，不能只依赖扩展名或客户端提供的 MIME 类型。
+- 将 LLM 输出视为不可信输入：解析结构化数据、校验数值范围、转义渲染的 HTML，并提供明确的降级逻辑。
+- 中文文本统一使用 UTF-8。
+- 避免静默捕获异常。日志应包含可操作的上下文，但不能包含密钥或完整图片数据。
+- API 契约必须与前端类型保持同步。
+- 修改 schema 时，记录兼容性影响并保留已有数据。
 
-## Verification Gate
+## 提交前验证门禁
 
-Before every commit:
+每次提交前：
 
-1. Review `git diff` and `git diff --check`.
-2. Confirm staged scope excludes secrets, local databases, uploads, build output, and unrelated files.
-3. Run backend verification:
+1. 审查 `git diff` 并运行 `git diff --check`。
+2. 确认暂存范围不包含密钥、本地数据库、上传文件、构建产物和无关文件。
+3. 运行后端验证：
    - `cd backend && python -m compileall app tests debug_vision.py`
    - `cd backend && python -m unittest discover -s tests -v`
-4. Run frontend verification:
+4. 运行前端验证：
    - `cd frontend && npm run build`
-5. For UI changes, start local services and verify affected pages in a browser at desktop and mobile widths.
-6. Check console errors, horizontal overflow, text overlap, loading/error/empty states, and primary interactions.
-7. Review security-sensitive behavior, especially uploads, HTML rendering, logs, and secret handling.
-8. Commit only when the implementation, visual result, interaction, and tests have been reviewed.
+5. 涉及 UI 修改时，启动本地服务，并在桌面端和移动端宽度下通过浏览器验证受影响页面。
+6. 检查控制台错误、横向溢出、文本重叠、加载/错误/空数据状态和主要交互。
+7. 审查安全敏感行为，特别是文件上传、HTML 渲染、日志和密钥处理。
+8. 只有在实现、视觉效果、交互和测试均完成审查后才能提交。
 
-Do not claim completion based on prior test output. Use fresh evidence.
+不得依据之前的测试结果声称任务完成，必须提供本次执行得到的新验证依据。
 
-## Local Development
+## 本地开发
 
-- Backend: `cd backend && python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000`
-- Frontend: `cd frontend && npm run dev -- --host 127.0.0.1 --port 5173`
-- Frontend URL: `http://127.0.0.1:5173`
-- Backend URL: `http://127.0.0.1:8000`
+- 后端：`cd backend && python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000`
+- 前端：`cd frontend && npm run dev -- --host 127.0.0.1 --port 5173`
+- 前端地址：`http://127.0.0.1:5173`
+- 后端地址：`http://127.0.0.1:8000`
 
-If a port is occupied, reuse the existing project process or choose another port without terminating unrelated processes.
+如果端口已被占用，优先复用现有项目进程或选择其他端口，不得终止无关进程。
 
-## Current Product Priorities
+## 当前产品优先事项
 
-- Reliable food, meal, body-photo, and exercise-video multimodal analysis.
-- Separate breakfast, lunch, dinner, and snack analysis with a daily calorie summary.
-- Multi-view optional body analysis with persistent in-progress state.
-- Correct separation of source food images and generated finished-meal images.
-- Dietary alternatives and consolidated shopping lists.
-- Responsive layouts without overlap or horizontal page overflow.
+- 提高食品、餐食、身材照片和动作视频多模态分析的可靠性。
+- 分别分析早餐、午餐、晚餐和加餐，并提供每日总热量汇总。
+- 支持可选的多角度身材分析，并持久保存进行中的上传状态。
+- 正确区分食品原图和生成的餐食成品图。
+- 提供可替代食材和汇总后的食材采购清单。
+- 响应式布局不得出现元素重叠或页面横向溢出。
