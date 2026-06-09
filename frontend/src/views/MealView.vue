@@ -1,15 +1,16 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, useTemplateRef, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { recognizeMeal, calculateMeal } from '../api'
-import type { MealAnalysis, MealRecognizeResponse } from '../api'
+import { recognizeMeal, calculateMeal, getMealDailySummary } from '../api'
+import type { MealAnalysis, MealDailySummary } from '../api'
 import gsap from 'gsap'
 
 const router = useRouter()
 const loading = ref(false)
 const calculating = ref(false)
 const mealType = ref('lunch')
+const dailySummary = ref<MealDailySummary | null>(null)
 const pageRef = useTemplateRef<HTMLElement>('pageRef')
 const fileInputRef = useTemplateRef<HTMLInputElement>('fileInputRef')
 
@@ -42,6 +43,7 @@ const selectedFile = computed(() => currentState.value.selectedFile)
 const previewUrl = computed(() => currentState.value.previewUrl)
 const ingredients = computed(() => currentState.value.ingredients)
 const result = computed(() => currentState.value.result)
+const summaryProgress = computed(() => Math.min(dailySummary.value?.progress_pct ?? 0, 100))
 
 function animateResult() {
   nextTick(() => {
@@ -69,6 +71,45 @@ const mealTypeOptions = [
   { value: 'dinner', label: '晚餐' },
   { value: 'snack', label: '加餐' },
 ]
+
+function mealLabel(type: string): string {
+  return mealTypeOptions.find(o => o.value === type)?.label || type
+}
+
+async function refreshDailySummary() {
+  const userId = localStorage.getItem('userId')
+  if (!userId) return
+  try {
+    const summary = await getMealDailySummary(Number(userId))
+    dailySummary.value = summary
+    for (const opt of mealTypeOptions) {
+      const meal = summary.meals[opt.value]
+      if (!meal) continue
+      mealStates.value[opt.value].step = 'result'
+      mealStates.value[opt.value].previewUrl = meal.image_url
+      mealStates.value[opt.value].result = {
+        meal_type: opt.value,
+        items: meal.items,
+        meal_total: meal.meal_total,
+        daily_summary: {
+          daily_target_kcal: summary.daily_target_kcal,
+          estimated_tdee_kcal: summary.estimated_tdee_kcal,
+          consumed_kcal: summary.consumed_kcal,
+          remaining_target_kcal: summary.remaining_target_kcal,
+          current_deficit_kcal: summary.current_deficit_kcal,
+          status: summary.status,
+          suggestion: summary.suggestion,
+        },
+      }
+    }
+  } catch {
+    dailySummary.value = null
+  }
+}
+
+onMounted(() => {
+  void refreshDailySummary()
+})
 
 // 切换餐食类型时清空文件输入
 watch(mealType, () => {
@@ -103,7 +144,7 @@ async function doRecognize() {
   loading.value = true
 
   try {
-    const res = await recognizeMeal(Number(userId), currentState.value.selectedFile)
+    const res = await recognizeMeal(Number(userId), currentState.value.selectedFile, mealType.value)
     mealStates.value[mealType.value].recognitionId = res.recognition_id
     mealStates.value[mealType.value].ingredients = res.ingredients.map(i => ({ ...i }))
     mealStates.value[mealType.value].step = 'confirm'
@@ -161,6 +202,7 @@ async function doCalculate() {
     })
     mealStates.value[mealType.value].result = res
     mealStates.value[mealType.value].step = 'result'
+    await refreshDailySummary()
     ElMessage.success('计算完成')
   } catch (err: any) {
     ElMessage.error(err.response?.data?.detail || '计算失败')
@@ -209,6 +251,42 @@ function statusLabel(status: string): string {
     </div>
 
     <!-- 餐次选择（常驻显示） -->
+    <section v-if="dailySummary" class="daily-total-card">
+      <div class="daily-total-main">
+        <div>
+          <span class="summary-label">今日已摄入</span>
+          <strong>{{ dailySummary.consumed_kcal }}</strong>
+          <span>kcal</span>
+        </div>
+        <div>
+          <span class="summary-label">今日目标</span>
+          <strong>{{ dailySummary.daily_target_kcal }}</strong>
+          <span>kcal</span>
+        </div>
+        <div>
+          <span class="summary-label">剩余额度</span>
+          <strong>{{ dailySummary.remaining_target_kcal }}</strong>
+          <span>kcal</span>
+        </div>
+      </div>
+      <div class="daily-progress">
+        <div class="daily-progress-fill" :style="{ width: `${summaryProgress}%` }"></div>
+      </div>
+      <div class="daily-meal-grid">
+        <button
+          v-for="opt in mealTypeOptions"
+          :key="opt.value"
+          class="daily-meal-chip"
+          :class="{ 'daily-meal-chip--active': mealType === opt.value }"
+          @click="mealType = opt.value"
+        >
+          <span>{{ mealLabel(opt.value) }}</span>
+          <strong>{{ dailySummary.meals[opt.value]?.meal_total.calories_kcal ?? 0 }} kcal</strong>
+        </button>
+      </div>
+      <p class="daily-suggestion">{{ dailySummary.suggestion }}</p>
+    </section>
+
     <div class="meal-type-select">
       <label class="field-label">餐次</label>
       <div class="radio-group">
@@ -387,6 +465,79 @@ function statusLabel(status: string): string {
 .page-header { margin-bottom: var(--space-8); }
 .page-header h1 { font-size: var(--text-2xl); font-weight: 800; color: var(--color-text-primary); margin-bottom: var(--space-2); }
 .page-header p { font-size: var(--text-md); color: var(--color-text-secondary); }
+
+.daily-total-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-5);
+  margin-bottom: var(--space-5);
+}
+.daily-total-main {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+.daily-total-main div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.daily-total-main strong {
+  font-family: var(--font-mono);
+  font-size: var(--text-xl);
+  color: var(--color-text-primary);
+}
+.daily-progress {
+  height: 8px;
+  background: var(--color-border-subtle);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-bottom: var(--space-4);
+}
+.daily-progress-fill {
+  height: 100%;
+  background: var(--color-accent);
+  border-radius: 999px;
+  transition: width var(--duration-normal) var(--ease-out);
+}
+.daily-meal-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+.daily-meal-chip {
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  padding: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+  text-align: left;
+}
+.daily-meal-chip span {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+}
+.daily-meal-chip strong {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--color-text-primary);
+}
+.daily-meal-chip--active {
+  border-color: var(--color-accent);
+  background: var(--color-accent-subtle);
+}
+.daily-suggestion {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  line-height: var(--leading-relaxed);
+  margin: 0;
+}
 
 .meal-type-select { margin-bottom: var(--space-5); }
 .field-label { display: block; font-size: var(--text-sm); font-weight: 600; color: var(--color-text-primary); margin-bottom: var(--space-2); }

@@ -3,7 +3,7 @@ import { ref, onMounted, nextTick, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { recognizeIngredients, confirmIngredients, generateRecipes, getLatestRecipe } from '../api'
-import type { IngredientItem, RecognizeResponse, RecipeResponse } from '../types'
+import type { IngredientItem, RecognizeResponse, RecipeItem, RecipeResponse } from '../types'
 import gsap from 'gsap'
 
 const router = useRouter()
@@ -18,6 +18,7 @@ const recognition = ref<RecognizeResponse | null>(null)
 const editableIngredients = ref<IngredientItem[]>([])
 const recipes = ref<RecipeResponse | null>(null)
 const loadingMsg = ref('')
+const selectedImage = ref<{ url: string; alt: string } | null>(null)
 
 function animateStep() {
   nextTick(() => {
@@ -136,10 +137,35 @@ function resetAll() {
 }
 
 function formatRecipe(text: string): string {
-  return text
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
+
+  return escaped
     .replace(/\n/g, '<br>')
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/#{1,3}\s(.+)/g, '<h4>$1</h4>')
+}
+
+function openRecipeImage(url: string, alt: string) {
+  selectedImage.value = { url, alt }
+}
+
+function closeRecipeImage() {
+  selectedImage.value = null
+}
+
+function hasFinishedImage(recipe: RecipeItem): boolean {
+  const url = recipe.image?.url || ''
+  const status = recipe.image?.status || ''
+  return Boolean(
+    url
+    && !url.includes('default-recipe')
+    && !['placeholder', 'failed', 'disabled', 'missing_api_key'].includes(status)
+  )
 }
 
 // 页面加载时恢复已有菜谱
@@ -266,18 +292,22 @@ onMounted(async () => {
         </div>
       </div>
 
+      <section v-if="recipes.food_image_url" class="result-food-section">
+        <h3 class="result-section-title">食品图</h3>
+        <button
+          class="result-food-image"
+          type="button"
+          aria-label="查看食品图大图"
+          @click="openRecipeImage(recipes.food_image_url, '食品图')"
+        >
+          <img :src="recipes.food_image_url" alt="食品图" class="recipe-image" />
+          <span class="recipe-image-zoom" aria-hidden="true">↗</span>
+        </button>
+      </section>
+
       <!-- 菜谱卡片 -->
       <div class="recipe-cards">
         <div v-for="(r, index) in recipes.recipes" :key="index" class="recipe-card">
-          <!-- 菜谱图片 -->
-          <div class="recipe-image-wrap" v-if="r.image">
-            <img
-              :src="r.image.url"
-              :alt="r.image.alt"
-              class="recipe-image"
-              @error="($event.target as HTMLImageElement).src = '/default-recipe.svg'"
-            />
-          </div>
           <h3 class="recipe-name">{{ r.name }}</h3>
           <div class="recipe-tags">
             <span class="recipe-tag recipe-tag--cal">{{ r.calories_est }} kcal</span>
@@ -288,7 +318,23 @@ onMounted(async () => {
           <div class="recipe-ingredients">
             <span v-for="ing in r.ingredients" :key="ing" class="recipe-ing">{{ ing }}</span>
           </div>
-          <p class="recipe-steps">{{ r.steps }}</p>
+          <section class="recipe-method">
+            <h4 class="recipe-section-title">做法</h4>
+            <p class="recipe-steps">{{ r.steps }}</p>
+          </section>
+          <section v-if="hasFinishedImage(r)" class="recipe-finished">
+            <h4 class="recipe-section-title">成品图</h4>
+            <button
+              class="recipe-finished-image"
+              type="button"
+              :aria-label="`查看${r.image.alt || r.name}成品图大图`"
+              @click="openRecipeImage(r.image.url, r.image.alt || `${r.name}成品图`)"
+            >
+              <img :src="r.image.url" :alt="r.image.alt || `${r.name}成品图`" class="recipe-image" />
+              <span class="recipe-image-label">成品图</span>
+              <span class="recipe-image-zoom" aria-hidden="true">↗</span>
+            </button>
+          </section>
           <!-- 替代食材 -->
           <div v-if="r.substitute_ingredients?.length" class="recipe-substitutes">
             <h4 class="sub-title">替代建议</h4>
@@ -316,6 +362,20 @@ onMounted(async () => {
         <button class="btn btn-primary" @click="resetAll">再拍一张</button>
         <button class="btn btn-ghost" @click="router.push('/plan')">查看减脂计划</button>
       </div>
+    </div>
+
+    <div
+      v-if="selectedImage"
+      class="image-lightbox"
+      role="dialog"
+      aria-modal="true"
+      :aria-label="selectedImage.alt"
+      @click.self="closeRecipeImage"
+    >
+      <button class="image-lightbox-close" type="button" aria-label="关闭大图" @click="closeRecipeImage">
+        ×
+      </button>
+      <img :src="selectedImage.url" :alt="selectedImage.alt" class="image-lightbox-img" />
     </div>
   </div>
 </template>
@@ -393,6 +453,29 @@ onMounted(async () => {
 .result-meta { display: flex; gap: var(--space-4); flex-wrap: wrap; }
 .meta-item { font-size: var(--text-sm); color: var(--color-text-secondary); font-family: var(--font-mono); }
 
+.result-food-section {
+  margin-bottom: var(--space-5);
+}
+.result-section-title {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  margin-bottom: var(--space-2);
+}
+.result-food-image {
+  position: relative;
+  display: grid;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  max-height: 360px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--color-border-subtle);
+  color: inherit;
+  cursor: zoom-in;
+}
+
 .recipe-cards { display: flex; flex-direction: column; gap: var(--space-4); margin-bottom: var(--space-6); }
 .recipe-card {
   background: var(--color-surface); border: 1px solid var(--color-border-subtle);
@@ -401,15 +484,52 @@ onMounted(async () => {
 .recipe-image-wrap {
   margin: calc(-1 * var(--space-5)) calc(-1 * var(--space-5)) var(--space-4) calc(-1 * var(--space-5));
   border-radius: var(--radius-md) var(--radius-md) 0 0;
+  border: 0;
+  color: inherit;
+  cursor: zoom-in;
+  display: grid;
+  padding: 0;
+  position: relative;
+  width: calc(100% + var(--space-10));
   overflow: hidden;
-  height: 180px;
+  aspect-ratio: 4 / 3;
+  max-height: 420px;
   background: var(--color-border-subtle);
 }
 .recipe-image {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   display: block;
+}
+.recipe-image-label {
+  position: absolute;
+  left: var(--space-3);
+  top: var(--space-3);
+  padding: 3px 9px;
+  border-radius: var(--radius-sm);
+  background: oklch(1 0 0 / 0.9);
+  color: var(--color-text-primary);
+  box-shadow: var(--shadow-sm);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  pointer-events: none;
+}
+.recipe-image-zoom {
+  position: absolute;
+  right: var(--space-3);
+  bottom: var(--space-3);
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: oklch(1 0 0 / 0.9);
+  color: var(--color-text-primary);
+  box-shadow: var(--shadow-sm);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  pointer-events: none;
 }
 .recipe-name { font-size: var(--text-md); font-weight: 700; margin-bottom: var(--space-2); }
 .recipe-tags { display: flex; gap: var(--space-2); margin-bottom: var(--space-3); }
@@ -420,8 +540,32 @@ onMounted(async () => {
 .recipe-tag--fat { background: oklch(0.93 0.04 30); color: oklch(0.45 0.12 30); }
 .recipe-ingredients { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-3); }
 .recipe-ing { font-size: var(--text-xs); padding: 2px 8px; background: var(--color-surface); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-sm); color: var(--color-text-secondary); }
+.recipe-method,
+.recipe-finished {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border-subtle);
+}
+.recipe-section-title {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  margin-bottom: var(--space-2);
+}
 .recipe-steps { font-size: var(--text-sm); color: var(--color-text-secondary); line-height: var(--leading-relaxed); }
-
+.recipe-finished-image {
+  position: relative;
+  display: grid;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  max-height: 420px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--color-border-subtle);
+  color: inherit;
+  cursor: zoom-in;
+}
 .recipe-substitutes { margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--color-border-subtle); }
 .sub-title { font-size: var(--text-xs); font-weight: 700; color: var(--color-text-tertiary); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: var(--space-2); }
 .sub-item { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-1); font-size: var(--text-sm); }
@@ -443,6 +587,42 @@ onMounted(async () => {
 .full-recipe-content :deep(strong) { font-weight: 700; }
 
 .result-actions { display: flex; gap: var(--space-3); }
+
+.image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+  background: oklch(0.12 0.02 145 / 0.78);
+}
+.image-lightbox-img {
+  max-width: min(100%, 1100px);
+  max-height: 86vh;
+  object-fit: contain;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  background: var(--color-surface);
+}
+.image-lightbox-close {
+  position: fixed;
+  top: var(--space-5);
+  right: var(--space-5);
+  width: 40px;
+  height: 40px;
+  border: 1px solid oklch(1 0 0 / 0.25);
+  border-radius: 50%;
+  background: oklch(1 0 0 / 0.92);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  font-size: var(--text-xl);
+  line-height: 1;
+  box-shadow: var(--shadow-md);
+}
+.image-lightbox-close:hover {
+  background: oklch(1 0 0);
+}
 
 /* Buttons */
 .btn {

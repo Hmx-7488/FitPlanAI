@@ -8,9 +8,12 @@ BACKEND_DIR = Path(__file__).parent.parent.parent
 
 class Settings(BaseSettings):
     LLM_API_KEY: str = ""
-    LLM_BASE_URL: str = "https://token-plan-cn.xiaomimimo.com/v1"
-    LLM_MODEL: str = "mimo-v2.5-pro"
-    VISION_MODEL: str = ""  # 留空则使用 LLM_MODEL
+    LLM_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    LLM_MODEL: str = "qwen-plus"
+    VISION_MODEL: str = "qwen-vl-plus"
+    IMAGE_MODEL: str = "wanx2.1-t2i-turbo"
+    IMAGE_BASE_URL: str = "https://dashscope.aliyuncs.com/api/v1"
+    IMAGE_GENERATION_ENABLED: bool = True
     DATABASE_URL: str = "sqlite+aiosqlite:///./slim_agent.db"
 
     model_config = {

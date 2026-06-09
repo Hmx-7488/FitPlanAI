@@ -6,9 +6,18 @@ const headerRef = useTemplateRef<HTMLElement>('headerRef')
 
 onMounted(() => {
   if (headerRef.value) {
-    gsap.from(headerRef.value, { y: -20, opacity: 0, duration: 0.5, ease: 'power3.out' })
-    gsap.from(headerRef.value.querySelectorAll('.nav-link'), {
+    const links = headerRef.value.querySelectorAll('.nav-link')
+    gsap.from(headerRef.value, {
+      y: -20,
+      duration: 0.5,
+      ease: 'power3.out',
+      onComplete: () => gsap.set(headerRef.value, { clearProps: 'transform' }),
+      onInterrupt: () => gsap.set(headerRef.value, { clearProps: 'transform' }),
+    })
+    gsap.from(links, {
       y: -10, opacity: 0, stagger: 0.04, duration: 0.3, ease: 'power2.out', delay: 0.2,
+      onComplete: () => gsap.set(links, { clearProps: 'transform,opacity' }),
+      onInterrupt: () => gsap.set(links, { clearProps: 'transform,opacity' }),
     })
   }
 })
@@ -107,6 +116,7 @@ function onLeave(el: Element, done: () => void) {
 .nav {
   display: flex;
   gap: var(--space-1);
+  min-width: 0;
 }
 
 .nav-link {
@@ -136,5 +146,38 @@ function onLeave(el: Element, done: () => void) {
   width: 100%;
   margin: 0 auto;
   padding: var(--space-8) var(--space-6);
+}
+
+@media (max-width: 720px) {
+  .header-inner {
+    width: 100%;
+    padding: 0 var(--space-3);
+    gap: var(--space-3);
+  }
+
+  .brand {
+    flex: 0 0 auto;
+  }
+
+  .nav {
+    flex: 1 1 auto;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: none;
+  }
+
+  .nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .nav-link {
+    flex: 0 0 auto;
+    padding: var(--space-2);
+    font-size: var(--text-sm);
+  }
+
+  .app-main {
+    padding: var(--space-6) var(--space-4);
+  }
 }
 </style>

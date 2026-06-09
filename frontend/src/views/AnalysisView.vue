@@ -75,7 +75,6 @@ onMounted(async () => {
           ease: 'power2.out',
           delay: 0.4,
           onUpdate() {
-            const suffix = el.querySelector('small')?.textContent || ''
             el.childNodes[0].textContent = Math.round(obj.val).toLocaleString()
           },
         })

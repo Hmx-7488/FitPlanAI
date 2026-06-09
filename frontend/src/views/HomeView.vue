@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, nextTick, useTemplateRef } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
 import { getDashboard, type DashboardData } from '../api'
 import { heroEntrance, dashboardEntrance, flowStepsEntrance, progressFillIn, countUp } from '../utils/animations'
 
@@ -14,11 +13,6 @@ const consumedRef = useTemplateRef<HTMLElement>('consumedRef')
 const streakRef = useTemplateRef<HTMLElement>('streakRef')
 const weightRef = useTemplateRef<HTMLElement>('weightRef')
 const progressRef = useTemplateRef<HTMLElement>('progressRef')
-
-const mealProgressPct = computed(() => {
-  if (!data.value) return 0
-  return Math.min(data.value.meal_summary.progress_pct, 100)
-})
 
 const calorieStatus = computed(() => {
   if (!data.value) return { label: '未知', color: 'var(--color-text-tertiary)' }
@@ -294,15 +288,15 @@ onMounted(async () => {
 
 /* Stats Grid */
 .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-4); margin-bottom: var(--space-6); }
-.stat-card { background: var(--color-surface); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-md); padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-2); cursor: pointer; transition: all var(--duration-fast) var(--ease-out); position: relative; }
+.stat-card { background: var(--color-surface); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-md); padding: var(--space-4); display: flex; flex-direction: column; gap: var(--space-2); cursor: pointer; transition: all var(--duration-fast) var(--ease-out); position: relative; min-width: 0; overflow: hidden; }
 .stat-card:hover { border-color: var(--color-accent); transform: translateY(-2px); box-shadow: var(--shadow-md); }
 .stat-card--empty { border-style: dashed; opacity: 0.7; }
 .stat-card--empty:hover { opacity: 1; }
 .stat-icon { font-size: 24px; line-height: 1; }
-.stat-body { display: flex; flex-direction: column; }
+.stat-body { display: flex; flex-direction: column; min-width: 0; }
 .stat-value { font-family: var(--font-mono); font-size: var(--text-xl); font-weight: 800; color: var(--color-text-primary); line-height: 1.2; }
 .stat-value small { font-size: var(--text-xs); font-weight: 500; color: var(--color-text-tertiary); margin-left: 2px; }
-.stat-label { font-size: var(--text-xs); color: var(--color-text-tertiary); margin-top: var(--space-1); }
+.stat-label { font-size: var(--text-xs); color: var(--color-text-tertiary); margin-top: var(--space-1); overflow-wrap: anywhere; line-height: var(--leading-normal); }
 .stat-badge { font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: var(--radius-sm); background: oklch(0.93 0.06 145); color: oklch(0.40 0.12 145); align-self: flex-start; }
 .stat-badge--warn { background: oklch(0.93 0.06 80); color: oklch(0.45 0.12 80); }
 
@@ -310,17 +304,17 @@ onMounted(async () => {
 .quick-section { margin-bottom: var(--space-6); }
 .section-title { font-size: var(--text-lg); font-weight: 700; color: var(--color-text-primary); margin-bottom: var(--space-4); letter-spacing: -0.01em; }
 .quick-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-3); }
-.quick-item { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-4); background: var(--color-surface); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-md); cursor: pointer; transition: all var(--duration-fast) var(--ease-out); }
+.quick-item { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-4); background: var(--color-surface); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-md); cursor: pointer; transition: all var(--duration-fast) var(--ease-out); min-width: 0; overflow: hidden; }
 .quick-item:hover { border-color: var(--color-accent); transform: translateY(-1px); box-shadow: var(--shadow-sm); }
 .quick-icon { font-size: 22px; flex-shrink: 0; }
 .quick-body { display: flex; flex-direction: column; min-width: 0; }
 .quick-title { font-size: var(--text-sm); font-weight: 700; color: var(--color-text-primary); }
-.quick-desc { font-size: var(--text-xs); color: var(--color-text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.quick-desc { font-size: var(--text-xs); color: var(--color-text-tertiary); white-space: normal; overflow-wrap: anywhere; line-height: var(--leading-normal); }
 
 /* Plan Summary */
 .plan-summary { margin-bottom: var(--space-6); }
 .summary-card { background: var(--color-surface); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-md); padding: var(--space-5); }
-.summary-card p { font-size: var(--text-sm); color: var(--color-text-secondary); line-height: var(--leading-relaxed); margin-bottom: var(--space-4); white-space: pre-line; }
+.summary-card p { font-size: var(--text-sm); color: var(--color-text-secondary); line-height: var(--leading-relaxed); margin-bottom: var(--space-4); white-space: pre-line; overflow-wrap: anywhere; }
 
 /* Flow (未建档) */
 .flow { padding: var(--space-6) 0; }

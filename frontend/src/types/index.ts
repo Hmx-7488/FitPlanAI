@@ -126,6 +126,7 @@ export interface RecipeImage {
   url: string
   alt: string
   generation_prompt: string
+  status?: string
 }
 
 export interface RecipeItem {
@@ -146,6 +147,7 @@ export interface RecipeResponse {
   recipe_id: number
   user_id: number
   recognition_id: number
+  food_image_url?: string
   recipes: RecipeItem[]
   total_calories: number
   total_protein: number
@@ -157,10 +159,12 @@ export interface RecipeResponse {
 export interface BodyPhotoAnalysis {
   analysis_id: string
   photo_url?: string
+  photo_urls?: Record<string, string>
   quality_check: {
     is_usable: boolean
     lighting: string
     pose: string
+    visible_body_regions?: string[]
   }
   body_fat_estimate: {
     estimated_range: string
@@ -178,6 +182,15 @@ export interface PoseAnalysis {
   analysis_id: string
   movement_name: string
   score: number
+  photo_url?: string
+  video_url?: string
+  frame_urls?: string[]
+  media_type?: 'image' | 'video'
+  rep_count_estimate?: number | null
+  phases?: {
+    phase: string
+    observation: string
+  }[]
   issues: {
     type: string
     severity: string

@@ -39,6 +39,7 @@ class RecipeImage(BaseModel):
     url: str = "/uploads/recipes/default-recipe.png"  # 默认占位图
     alt: str = "菜谱成品图"
     generation_prompt: str = ""  # 图片生成提示词
+    status: str = "placeholder"
 
 
 class SubstituteItem(BaseModel):
@@ -65,6 +66,7 @@ class RecipeResponse(BaseModel):
     recipe_id: int
     user_id: int
     recognition_id: int
+    food_image_url: str = ""
     recipes: list[RecipeItem]
     total_calories: int
     total_protein: float

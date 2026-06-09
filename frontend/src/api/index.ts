@@ -178,12 +178,19 @@ export async function getDashboard(userId: number): Promise<DashboardData> {
 }
 
 // 身材照片分析
-export async function analyzeBodyPhoto(userId: number, imageFile: File) {
+export async function analyzeBodyPhoto(userId: number, imageFile: File | { front?: File | null; side?: File | null; back?: File | null }) {
   const formData = new FormData()
   formData.append('user_id', String(userId))
-  formData.append('image', imageFile)
+  if (imageFile instanceof File) {
+    formData.append('image', imageFile)
+  } else {
+    if (imageFile.front) formData.append('front_image', imageFile.front)
+    if (imageFile.side) formData.append('side_image', imageFile.side)
+    if (imageFile.back) formData.append('back_image', imageFile.back)
+  }
   const res = await api.post('/body/analyze', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 180000,
   })
   return res.data
 }
@@ -196,6 +203,21 @@ export async function analyzePose(userId: number, imageFile: File, movementName:
   formData.append('movement_name', movementName)
   const res = await api.post('/pose/analyze', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
+  })
+  return res.data
+}
+
+export async function analyzePoseVideo(userId: number, videoFile: File, frames: File[], movementName: string) {
+  const formData = new FormData()
+  formData.append('user_id', String(userId))
+  formData.append('video', videoFile)
+  formData.append('movement_name', movementName)
+  frames.forEach((frame, index) => {
+    formData.append('frames', frame, `frame_${index}.jpg`)
+  })
+  const res = await api.post('/pose/analyze-video', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 180000,
   })
   return res.data
 }
@@ -250,12 +272,41 @@ export interface MealAnalysis {
   }
 }
 
+export interface MealDailySummary {
+  date: string
+  meal_count: number
+  daily_target_kcal: number
+  estimated_tdee_kcal: number
+  consumed_kcal: number
+  remaining_target_kcal: number
+  current_deficit_kcal: number
+  progress_pct: number
+  status: string
+  suggestion: string
+  consumed: {
+    calories_kcal: number
+    protein_g: number
+    carbs_g: number
+    fat_g: number
+  }
+  meals: Record<string, {
+    id: number
+    meal_type: string
+    image_url: string
+    items: MealAnalysis['items']
+    meal_total: MealAnalysis['meal_total']
+    created_at?: string
+  } | null>
+}
+
 export async function recognizeMeal(
   userId: number,
-  imageFile: File
+  imageFile: File,
+  mealType: string = 'lunch'
 ): Promise<MealRecognizeResponse> {
   const formData = new FormData()
   formData.append('user_id', String(userId))
+  formData.append('meal_type', mealType)
   formData.append('image', imageFile)
   const res = await api.post<MealRecognizeResponse>('/meal/recognize', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
@@ -270,5 +321,11 @@ export async function calculateMeal(
   const res = await api.post<MealAnalysis>('/meal/calculate', data, {
     timeout: 120000,
   })
+  return res.data
+}
+
+export async function getMealDailySummary(userId: number, date?: string): Promise<MealDailySummary> {
+  const query = date ? `?date=${encodeURIComponent(date)}` : ''
+  const res = await api.get<MealDailySummary>(`/meal/daily-summary/${userId}${query}`)
   return res.data
 }

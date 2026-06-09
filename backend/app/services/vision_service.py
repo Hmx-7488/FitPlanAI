@@ -4,6 +4,7 @@ import json
 import base64
 import uuid
 import re
+import asyncio
 from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 from langchain_openai import ChatOpenAI
@@ -12,9 +13,11 @@ from app.core.config import get_settings
 from app.models.user import User, IngredientRecognition, Recipe
 from app.schemas.vision import (
     IngredientItem, RecognizeResponse, ConfirmRequest, ConfirmResponse,
-    RecipeRequest, RecipeItem, RecipeImage, RecipeResponse,
+    RecipeRequest, RecipeItem, RecipeImage, RecipeResponse, SubstituteItem,
 )
 from app.rag.retriever import retrieve_knowledge
+from app.services.image_generation_service import generate_recipe_image
+from app.services.image_utils import image_extension
 
 settings = get_settings()
 
@@ -36,14 +39,18 @@ def _get_vision_llm(max_tokens: int = 1000):
     )
 
 
-def _encode_image(image_bytes: bytes) -> str:
+def _encode_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
     """将图片编码为 base64 data URL"""
     b64 = base64.b64encode(image_bytes).decode("utf-8")
-    return f"data:image/jpeg;base64,{b64}"
+    return f"data:{mime_type};base64,{b64}"
 
 
 async def recognize_ingredients(
-    db: AsyncSession, user_id: int, image_bytes: bytes, filename: str = "photo.jpg",
+    db: AsyncSession,
+    user_id: int,
+    image_bytes: bytes,
+    filename: str = "photo.jpg",
+    mime_type: str = "image/jpeg",
 ) -> RecognizeResponse:
     """识别图片中的食材"""
     user = await db.get(User, user_id)
@@ -51,14 +58,14 @@ async def recognize_ingredients(
         raise ValueError("用户不存在")
 
     # 保存图片
-    ext = Path(filename).suffix or ".jpg"
+    ext = image_extension(mime_type, filename)
     saved_name = f"{uuid.uuid4().hex}{ext}"
     saved_path = UPLOAD_DIR / saved_name
     saved_path.write_bytes(image_bytes)
 
     # 调用 Vision Model
     llm = _get_vision_llm(max_tokens=800)
-    image_data = _encode_image(image_bytes)
+    image_data = _encode_image(image_bytes, mime_type=mime_type)
 
     prompt = (
         "请识别图片中的食材。对于每个食材，输出 JSON 数组：\n"
@@ -164,7 +171,7 @@ async def generate_recipes(db: AsyncSession, request: RecipeRequest) -> RecipeRe
     recipe_knowledge = "\n".join(retrieve_knowledge(f"食谱 做法 {names}", k=2))
     nutrition_knowledge = "\n".join(retrieve_knowledge(f"食材热量 {names}", k=2))
 
-    llm = _get_vision_llm(max_tokens=1200)
+    llm = _get_vision_llm(max_tokens=1800)
     prompt = f"""你是轻食厨师。根据以下食材生成 2-3 个轻食方案。
 
 可用食材：
@@ -175,16 +182,33 @@ async def generate_recipes(db: AsyncSession, request: RecipeRequest) -> RecipeRe
 参考：{recipe_knowledge[:400]}
 {nutrition_knowledge[:300]}
 
-每个方案：
-**菜名**
-- 食材：用量
-- 热量：约 XXX kcal | 蛋白质：XXg
-- 做法：3-5 步
-最后附烹饪小贴士。简洁实用。"""
+只输出严格 JSON 数组，不要 Markdown 或额外说明。每个方案结构：
+{{
+  "name": "菜名",
+  "ingredients": ["鸡胸肉 150g", "生菜 100g"],
+  "calories_est": 350,
+  "protein_est": 35,
+  "carbs_est": 30,
+  "fat_est": 10,
+  "steps": ["步骤1", "步骤2", "步骤3"],
+  "substitute_ingredients": [
+    {{"missing": "鸡胸肉", "alternatives": ["去皮鸡腿肉 170g", "北豆腐 250g"]}}
+  ],
+  "shopping_list": ["生菜 100g", "全麦面包 2片"]
+}}
+
+要求：
+1. 优先使用用户已有食材；购物清单只列方案需要但用户未提供的食材。
+2. 每个主要食材提供 1-2 个营养接近的替代项，替代项不得包含忌口或过敏食材。
+3. 做法必须是 3-5 个可执行步骤。
+4. 营养数值必须是数字，食材必须带大致用量。"""
 
     response = llm.invoke([HumanMessage(content=prompt)])
-    recipe_content = response.content
-    recipes = _parse_recipes(recipe_content, request.confirmed_ingredients)
+    raw_recipe_content = response.content
+    recipes = _parse_recipes(raw_recipe_content, request.confirmed_ingredients)
+    if not recipes:
+        raise ValueError("菜谱模型返回格式无效，请重试")
+    recipe_content = _format_recipe_content(recipes)
 
     recipe = Recipe(
         user_id=request.user_id,
@@ -199,10 +223,29 @@ async def generate_recipes(db: AsyncSession, request: RecipeRequest) -> RecipeRe
     await db.commit()
     await db.refresh(recipe)
 
+    image_results = await asyncio.gather(*[
+        asyncio.to_thread(generate_recipe_image, item.image.generation_prompt, recipe.id, index)
+        for index, item in enumerate(recipes)
+    ])
+    recipe_images = []
+    for item, image_result in zip(recipes, image_results):
+        item.image.url = image_result["url"]
+        item.image.status = image_result["status"]
+        recipe_images.append(item.image.model_dump())
+
+    recipe.nutrition_json = json.dumps({
+        "total_calories": sum(r.calories_est for r in recipes),
+        "total_protein": sum(r.protein_est for r in recipes),
+        "recipe_images": recipe_images,
+    }, ensure_ascii=False)
+    await db.commit()
+    await db.refresh(recipe)
+
     return RecipeResponse(
         recipe_id=recipe.id,
         user_id=request.user_id,
         recognition_id=request.recognition_id,
+        food_image_url=f"/uploads/{Path(rec.image_path).name}" if rec.image_path else "",
         recipes=recipes,
         total_calories=sum(r.calories_est for r in recipes),
         total_protein=sum(r.protein_est for r in recipes),
@@ -212,74 +255,154 @@ async def generate_recipes(db: AsyncSession, request: RecipeRequest) -> RecipeRe
 
 
 def _parse_recipes(content: str, ingredients: list[IngredientItem]) -> list[RecipeItem]:
-    """从 LLM 输出中解析菜谱"""
-    recipes = []
-    sections = content.split("**")
-    current_name = ""
-    current_lines = []
+    """Parse current JSON responses and historical Markdown recipe records."""
+    json_start = content.find("[")
+    json_end = content.rfind("]") + 1
+    if json_start >= 0 and json_end > json_start:
+        try:
+            data = json.loads(content[json_start:json_end])
+            if isinstance(data, list):
+                recipes = [
+                    _build_structured_recipe(item, ingredients)
+                    for item in data[:3]
+                    if isinstance(item, dict)
+                ]
+                if recipes:
+                    return recipes
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
 
-    for section in sections:
-        section = section.strip()
-        if not section:
-            continue
-        if "\n" not in section[:30] and len(section) < 30:
-            if current_name and current_lines:
-                recipes.append(_build_recipe(current_name, current_lines, ingredients))
-            current_name = section.replace("*", "").strip()
-            current_lines = []
-        else:
-            current_lines.extend(section.split("\n"))
-
-    if current_name and current_lines:
-        recipes.append(_build_recipe(current_name, current_lines, ingredients))
+    heading_pattern = re.compile(
+        r"(?ms)^#{1,4}\s*\*\*(?:\d+[.、]\s*)?(.+?)\*\*\s*(.*?)(?=^#{1,4}\s*\*\*|\Z)"
+    )
+    recipes = [
+        _build_recipe(name.strip(), body.strip().splitlines(), ingredients)
+        for name, body in heading_pattern.findall(content)
+    ]
     return recipes[:3]
+
+
+def _build_structured_recipe(data: dict, available: list[IngredientItem]) -> RecipeItem:
+    name = str(data.get("name", "")).strip()
+    if not name:
+        raise ValueError("Recipe name is required")
+
+    ingredient_lines = data.get("ingredients", [])
+    if not isinstance(ingredient_lines, list):
+        ingredient_lines = []
+    ingredient_lines = [str(item).strip() for item in ingredient_lines if str(item).strip()]
+
+    steps = data.get("steps", [])
+    if isinstance(steps, list):
+        steps_text = "\n".join(f"{index}. {step}" for index, step in enumerate(steps, 1))
+    else:
+        steps_text = str(steps).strip()
+
+    substitutes = []
+    raw_substitutes = data.get("substitute_ingredients", [])
+    if isinstance(raw_substitutes, list):
+        for item in raw_substitutes[:8]:
+            if not isinstance(item, dict):
+                continue
+            missing = str(item.get("missing", "")).strip()
+            alternatives = item.get("alternatives", [])
+            if missing and isinstance(alternatives, list):
+                substitutes.append(SubstituteItem(
+                    missing=missing,
+                    alternatives=[str(alt).strip() for alt in alternatives[:3] if str(alt).strip()],
+                ))
+
+    shopping = data.get("shopping_list", [])
+    if not isinstance(shopping, list):
+        shopping = []
+
+    available_names = {item.display_name for item in available}
+    used_names = [
+        item.display_name
+        for item in available
+        if any(item.display_name in line for line in ingredient_lines)
+    ]
+    image_ingredients = "、".join((used_names or ingredient_lines)[:4])
+
+    return RecipeItem(
+        name=name,
+        ingredients=ingredient_lines,
+        calories_est=max(0, int(float(data.get("calories_est", 0) or 0))) or 300,
+        protein_est=max(0, float(data.get("protein_est", 0) or 0)) or 20.0,
+        carbs_est=max(0, float(data.get("carbs_est", 0) or 0)),
+        fat_est=max(0, float(data.get("fat_est", 0) or 0)),
+        steps=steps_text,
+        image=RecipeImage(
+            alt=f"{name}成品图",
+            generation_prompt=(
+                f"真实食物摄影风格的{name}，使用{image_ingredients}，"
+                "白色餐盘，自然光，健康轻食成品，45度俯拍，无文字"
+            ),
+        ),
+        missing_ingredients=[
+            item
+            for item in shopping
+            if not any(name in str(item) for name in available_names)
+        ],
+        substitute_ingredients=substitutes,
+        shopping_list=[str(item).strip() for item in shopping if str(item).strip()],
+    )
+
+
+def _format_recipe_content(recipes: list[RecipeItem]) -> str:
+    sections = []
+    for index, recipe in enumerate(recipes, 1):
+        ingredients = "\n".join(f"- {item}" for item in recipe.ingredients)
+        substitutes = "\n".join(
+            f"- {item.missing}：{' / '.join(item.alternatives)}"
+            for item in recipe.substitute_ingredients
+        ) or "- 无"
+        shopping = "、".join(recipe.shopping_list) or "无需额外采购"
+        sections.append(
+            f"### **{index}. {recipe.name}**\n"
+            f"**食材**\n{ingredients}\n\n"
+            f"**营养估算**：{recipe.calories_est} kcal | 蛋白质 {recipe.protein_est:g}g | "
+            f"碳水 {recipe.carbs_est:g}g | 脂肪 {recipe.fat_est:g}g\n\n"
+            f"**做法**\n{recipe.steps}\n\n"
+            f"**替代食材**\n{substitutes}\n\n"
+            f"**购物清单**：{shopping}"
+        )
+    return "\n\n---\n\n".join(sections)
 
 
 def _build_recipe(name: str, lines: list[str], ingredients: list[IngredientItem]) -> RecipeItem:
     """构建单个菜谱项（含图片信息、替代食材和购物清单）"""
     full_text = "\n".join(lines)
 
-    calories = 0
-    for line in lines:
-        if "kcal" in line.lower() or "热量" in line:
-            nums = re.findall(r"(\d+)", line)
-            if nums:
-                calories = int(nums[0])
-                break
+    def labeled_number(label: str) -> float:
+        match = re.search(rf"{label}[^0-9]*([\d.]+)", full_text, re.IGNORECASE)
+        return float(match.group(1)) if match else 0
 
-    protein = 0.0
-    for line in lines:
-        if "蛋白" in line:
-            nums = re.findall(r"([\d.]+)", line)
-            if nums:
-                protein = float(nums[0])
-                break
-
-    carbs = 0.0
-    for line in lines:
-        if "碳水" in line:
-            nums = re.findall(r"([\d.]+)", line)
-            if nums:
-                carbs = float(nums[0])
-                break
-
-    fat = 0.0
-    for line in lines:
-        if "脂肪" in line:
-            nums = re.findall(r"([\d.]+)", line)
-            if nums:
-                fat = float(nums[0])
-                break
+    calories = int(labeled_number(r"(?:热量|calories?)"))
+    protein = labeled_number(r"蛋白质?")
+    carbs = labeled_number(r"碳水")
+    fat = labeled_number(r"脂肪")
 
     used = [ing.display_name for ing in ingredients if ing.display_name in full_text]
     if not used:
-        used = [i.display_name for i in ingredients[:3]]
+        ingredient_match = re.search(
+            r"(?ms)\*\*食材\*\*[：:]?\s*(.*?)(?=\n\s*\*\*|\Z)",
+            full_text,
+        )
+        if ingredient_match:
+            used = [
+                re.sub(r"^[-*\d.\s]+", "", line).strip()
+                for line in ingredient_match.group(1).splitlines()
+                if re.sub(r"^[-*\d.\s]+", "", line).strip()
+            ]
+        else:
+            used = [i.display_name for i in ingredients[:3]]
 
-    steps = ""
-    for line in lines:
-        if "做法" in line or "步骤" in line:
-            steps = line.split("：", 1)[-1].strip() if "：" in line else line
-            break
+    steps_match = re.search(
+        r"(?ms)\*\*(?:做法|步骤)\*\*[：:]?\s*(.*?)(?=\n\s*\*\*|\Z)",
+        full_text,
+    )
+    steps = steps_match.group(1).strip() if steps_match else ""
     if not steps:
         steps = full_text[:100]
 
@@ -312,7 +435,6 @@ def _build_recipe(name: str, lines: list[str], ingredients: list[IngredientItem]
     for common_ingredient, alternatives in common_missing_map.items():
         if common_ingredient in full_text and common_ingredient not in available_names:
             missing.append(common_ingredient)
-            from app.schemas.vision import SubstituteItem
             substitutes.append(SubstituteItem(
                 missing=common_ingredient,
                 alternatives=alternatives[:2],

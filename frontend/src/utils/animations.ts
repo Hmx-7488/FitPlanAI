@@ -1,7 +1,6 @@
 /**
  * GSAP 动画工具集 — Vue 3 可复用动画 composable
  */
-import { nextTick, type Ref } from 'vue'
 import gsap from 'gsap'
 
 /** 页面入场：标题 + 副标题 + 按钮依次淡入上移 */
@@ -19,6 +18,7 @@ export function heroEntrance(container: HTMLElement) {
 /** Dashboard 入场：header → calorie card → stat cards stagger */
 export function dashboardEntrance(container: HTMLElement) {
   const tl = gsap.timeline({ defaults: { ease: 'power3.out' } })
+  const animatedSelector = '.dash-header, .calorie-card, .stat-card, .quick-item, .plan-summary, .summary-card'
 
   tl.from(container.querySelectorAll('.dash-header'), {
     y: 20, opacity: 0, duration: 0.5,
@@ -35,19 +35,24 @@ export function dashboardEntrance(container: HTMLElement) {
   tl.from(container.querySelectorAll('.plan-summary, .summary-card'), {
     y: 20, opacity: 0, duration: 0.5,
   }, '-=0.2')
+  tl.eventCallback('onComplete', () => {
+    gsap.set(container.querySelectorAll(animatedSelector), { clearProps: 'transform,opacity' })
+  })
 
   return tl
 }
 
 /** 四步流程卡片 stagger 入场 */
 export function flowStepsEntrance(container: HTMLElement) {
-  return gsap.from(container.querySelectorAll('.flow-step'), {
-    y: 40,
-    opacity: 0,
-    scale: 0.95,
+  const steps = container.querySelectorAll('.flow-step')
+  const clearTransforms = () => gsap.set(steps, { clearProps: 'transform' })
+  return gsap.from(steps, {
+    y: 18,
     duration: 0.6,
-    stagger: 0.12,
+    stagger: 0.08,
     ease: 'power3.out',
+    onComplete: clearTransforms,
+    onInterrupt: clearTransforms,
   })
 }
 
