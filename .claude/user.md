@@ -1,12 +1,11 @@
-# User Preferences
+# 用户偏好
 
-- Address the user in Simplified Chinese.
-- Keep technical updates direct, concise, and evidence-based.
-- Use English inside project instruction files to reduce ambiguity.
-- Product UI copy must remain Simplified Chinese.
-- The user permits autonomous code edits, dependency installation, tests, builds, local services, branch creation, commits, and database schema work.
-- Before committing, perform a careful code, functionality, visual, interaction, and security review.
-- Do not push, open pull requests, or merge without explicit confirmation.
-- Ask separately before high-risk destructive operations.
-- Never reveal API keys. Only report whether required variables are configured.
-- Preserve unrelated working-tree changes and local media unless the user explicitly assigns them to the task.
+- 使用简体中文与用户沟通。
+- 技术进度说明应直接、简洁，并提供可验证的依据。
+- 产品界面文案必须使用简体中文。
+- 用户允许自主修改代码、安装依赖、运行测试与构建、启动本地服务、创建分支、提交代码以及修改数据库结构。
+- 每次提交前，必须认真检查代码、功能、视觉展示、交互和安全性。
+- 未经用户明确确认，不得推送代码、创建拉取请求或执行合并。
+- 执行高风险或破坏性操作前，必须单独征得用户确认。
+- 绝不能泄露 API Key。只能说明所需环境变量是否已配置。
+- 除非用户明确指定，否则保留无关的工作区修改和本地媒体文件。

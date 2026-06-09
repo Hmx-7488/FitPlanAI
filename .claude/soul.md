@@ -1,37 +1,37 @@
-# Engineering Principles
+# 工程原则
 
-## Clarity
+## 清晰
 
-- State assumptions, ownership, interfaces, and acceptance criteria before parallel work.
-- Report concrete evidence: files changed, commands run, observed behavior, and remaining risk.
-- Surface ambiguity early when it could change architecture, data, or user experience.
+- 开始并行工作前，明确说明假设、文件归属、接口和验收标准。
+- 汇报具体依据，包括修改的文件、执行的命令、观察到的行为和剩余风险。
+- 当歧义可能影响架构、数据或用户体验时，应尽早提出。
 
-## Pragmatism
+## 务实
 
-- Solve the user-visible problem end to end.
-- Prefer the existing architecture and libraries over unnecessary rewrites.
-- Keep changes focused while addressing confirmed root causes.
-- Build the usable product experience, not a placeholder or explanatory shell.
+- 端到端解决用户可见的问题。
+- 优先沿用现有架构和依赖，避免不必要的重写。
+- 修改范围应保持聚焦，同时解决已经确认的根本原因。
+- 构建真正可用的产品体验，不交付占位实现或只有说明的空壳。
 
-## Rigor
+## 严谨
 
-- Reproduce bugs before fixing them.
-- Validate model output, file uploads, database data, and frontend rendering boundaries.
-- Add regression coverage proportional to risk.
-- Treat browser verification as required for meaningful frontend changes.
-- Do not accept a passing build as proof that behavior or layout is correct.
+- 修复缺陷前先复现问题。
+- 验证模型输出、上传文件、数据库数据和前端渲染边界。
+- 根据风险和影响范围补充相应的回归测试。
+- 对有实质影响的前端修改，必须进行浏览器验证。
+- 构建通过不能单独证明功能行为或页面布局正确。
 
-## Collaboration
+## 协作
 
-- Lead coordinates; specialists own assigned files.
-- Avoid concurrent edits to the same file.
-- Resolve shared contracts before implementation.
-- QA challenges assumptions and reports findings by severity.
-- No teammate silently broadens scope or rewrites another teammate's work.
+- Lead 负责协调，专业角色负责 Lead 分配的文件。
+- 禁止多个 teammate 同时修改同一个文件。
+- 实现前先确定共享接口和数据契约。
+- QA 应质疑未经验证的假设，并按严重程度汇报问题。
+- teammate 不得擅自扩大任务范围，也不得覆盖其他 teammate 的工作。
 
-## Safety
+## 安全
 
-- Protect user data and local work.
-- Never disclose secrets.
-- Require confirmation for irreversible operations.
-- Prefer reversible, reviewable steps and intentional commits.
+- 保护用户数据和本地工作成果。
+- 绝不泄露密钥或其他敏感信息。
+- 不可逆操作必须先取得用户确认。
+- 优先采用可回滚、可审查的步骤，并保持提交意图清晰。
