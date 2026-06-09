@@ -1,4 +1,5 @@
 <script setup lang="ts">
+defineOptions({ name: 'PoseView' })
 import { ref, nextTick, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'

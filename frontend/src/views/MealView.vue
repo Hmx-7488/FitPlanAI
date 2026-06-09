@@ -1,4 +1,5 @@
 <script setup lang="ts">
+defineOptions({ name: 'MealView' })
 import { ref, computed, nextTick, onMounted, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
