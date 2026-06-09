@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
+  "teammateMode": "in-process",
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep",
+      "WebFetch",
+      "WebSearch",
+      "Agent",
+      "Skill",
+      "Bash(*)"
+    ],
+    "ask": [
+      "Bash(git push *)",
+      "Bash(git reset --hard *)",
+      "Bash(git clean -f *)",
+      "Bash(rm -rf *)",
+      "Bash(sudo *)",
+      "Bash(docker system prune *)"
+    ],
+    "deny": [
+      "Read(.env)",
+      "Edit(.env)",
+      "Write(.env)"
+    ]
+  }
+}
