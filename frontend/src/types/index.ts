@@ -210,8 +210,8 @@ export interface MealItem {
   protein_g: number
   carbs_g: number
   fat_g: number
-  confidence: number
-  need_confirm: boolean
+  confidence?: number
+  need_confirm?: boolean
 }
 
 export interface DailySummary {
@@ -234,5 +234,32 @@ export interface MealAnalysis {
     fat_g: number
   }
   daily_summary: DailySummary
-  question_to_user: string
+  question_to_user?: string
+}
+
+export interface MealDailySummary {
+  date: string
+  meal_count: number
+  daily_target_kcal: number
+  estimated_tdee_kcal: number
+  consumed_kcal: number
+  remaining_target_kcal: number
+  current_deficit_kcal: number
+  progress_pct: number
+  status: string
+  suggestion: string
+  consumed: {
+    calories_kcal: number
+    protein_g: number
+    carbs_g: number
+    fat_g: number
+  }
+  meals: Record<string, {
+    id: number
+    meal_type: string
+    image_url: string
+    items: MealItem[]
+    meal_total: MealAnalysis['meal_total']
+    created_at?: string
+  } | null>
 }

@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { recognizeIngredients, confirmIngredients, generateRecipes, getLatestRecipe } from '../api'
 import type { IngredientItem, RecognizeResponse, RecipeItem, RecipeResponse } from '../types'
+import { sanitizeHtml } from '../utils/sanitize'
 import gsap from 'gsap'
 
 const router = useRouter()
@@ -144,10 +145,12 @@ function formatRecipe(text: string): string {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;')
 
-  return escaped
+  const rendered = escaped
     .replace(/\n/g, '<br>')
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/#{1,3}\s(.+)/g, '<h4>$1</h4>')
+
+  return sanitizeHtml(rendered)
 }
 
 function openRecipeImage(url: string, alt: string) {

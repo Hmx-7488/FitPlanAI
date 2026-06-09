@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from app.api.body import _coerce_body_fat_range
-from app.api.meal import _extract_json_array
+from app.services.vision_service import _extract_json_array
 from app.api.pose import _normalize_pose_result
 from app.schemas.vision import IngredientItem
 from app.services.image_utils import (

@@ -187,10 +187,10 @@ async def analyze_body_photo(
     # 尝试 Vision Model 分析
     result = None
     try:
-        from app.services.vision_service import _get_vision_llm, _encode_image
+        from app.services.vision_service import get_vision_llm, encode_image
         from langchain_core.messages import HumanMessage
 
-        llm = _get_vision_llm(max_tokens=900)
+        llm = get_vision_llm(max_tokens=900)
 
         gender_label = "male" if user.gender == "male" else "female"
         height_m = (user.height or 170) / 100
@@ -221,7 +221,7 @@ async def analyze_body_photo(
             message_content.append({"type": "text", "text": f"{VIEW_LABELS.get(item["view"], item["view"])}:"})
             message_content.append({
                 "type": "image_url",
-                "image_url": {"url": _encode_image(item["content"], mime_type=item["mime_type"]), "detail": "high"},
+                "image_url": {"url": encode_image(item["content"], mime_type=item["mime_type"]), "detail": "high"},
             })
         message = HumanMessage(content=message_content)
 

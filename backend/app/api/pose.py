@@ -174,17 +174,17 @@ async def _analyze_pose_frames(
     )
 
     try:
-        from app.services.vision_service import _get_vision_llm, _encode_image
+        from app.services.vision_service import get_vision_llm, encode_image
         from langchain_core.messages import HumanMessage
 
         content = [{"type": "text", "text": prompt}]
         for frame_bytes, mime_type in image_payloads[:6]:
             content.append({
                 "type": "image_url",
-                "image_url": {"url": _encode_image(frame_bytes, mime_type=mime_type), "detail": "low"},
+                "image_url": {"url": encode_image(frame_bytes, mime_type=mime_type), "detail": "low"},
             })
 
-        llm = _get_vision_llm(max_tokens=900)
+        llm = get_vision_llm(max_tokens=900)
         response = llm.invoke([HumanMessage(content=content)])
         raw = response.content.strip()
         logger.info("Vision Model raw pose %s response: %s", "video" if is_video else "image", raw)

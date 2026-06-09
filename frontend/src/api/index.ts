@@ -9,6 +9,9 @@ import type {
   RecognizeResponse,
   RecipeResponse,
   IngredientItem,
+  MealItem,
+  MealAnalysis,
+  MealDailySummary,
 } from '../types'
 
 const api = axios.create({
@@ -244,60 +247,8 @@ export interface MealCalculateRequest {
   meal_type: string
 }
 
-export interface MealAnalysis {
-  meal_type: string
-  items: Array<{
-    dish_name: string
-    calories_kcal: number
-    protein_g: number
-    carbs_g: number
-    fat_g: number
-    estimated_portion_g: number
-    confidence?: number
-  }>
-  meal_total: {
-    calories_kcal: number
-    protein_g: number
-    carbs_g: number
-    fat_g: number
-  }
-  daily_summary: {
-    daily_target_kcal: number
-    estimated_tdee_kcal: number
-    consumed_kcal: number
-    remaining_target_kcal: number
-    current_deficit_kcal: number
-    status: string
-    suggestion: string
-  }
-}
-
-export interface MealDailySummary {
-  date: string
-  meal_count: number
-  daily_target_kcal: number
-  estimated_tdee_kcal: number
-  consumed_kcal: number
-  remaining_target_kcal: number
-  current_deficit_kcal: number
-  progress_pct: number
-  status: string
-  suggestion: string
-  consumed: {
-    calories_kcal: number
-    protein_g: number
-    carbs_g: number
-    fat_g: number
-  }
-  meals: Record<string, {
-    id: number
-    meal_type: string
-    image_url: string
-    items: MealAnalysis['items']
-    meal_total: MealAnalysis['meal_total']
-    created_at?: string
-  } | null>
-}
+// MealAnalysis、MealDailySummary 统一从 types 导入
+export type { MealAnalysis, MealDailySummary, MealItem }
 
 export async function recognizeMeal(
   userId: number,

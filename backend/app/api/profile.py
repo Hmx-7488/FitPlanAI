@@ -96,11 +96,11 @@ async def estimate_body_fat_from_photo(
     note = ""
 
     try:
-        from app.services.vision_service import _get_vision_llm, _encode_image
+        from app.services.vision_service import get_vision_llm, encode_image
         from langchain_core.messages import HumanMessage
 
-        llm = _get_vision_llm(max_tokens=400)
-        image_data = _encode_image(content)
+        llm = get_vision_llm(max_tokens=400)
+        image_data = encode_image(content)
 
         gender_cn = "男性" if user.gender == "male" else "女性"
         prompt = (

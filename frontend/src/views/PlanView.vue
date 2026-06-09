@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getLatestPlan, generatePlan } from '../api'
 import type { PlanResponse, NeedInfoResponse } from '../types'
+import { sanitizeHtml } from '../utils/sanitize'
 import gsap from 'gsap'
 
 const router = useRouter()
@@ -115,10 +116,11 @@ function replaceDayLabels(text: string): string {
 }
 
 function formatPlan(text: string): string {
-  return replaceDayLabels(text)
+  const rendered = replaceDayLabels(text)
     .replace(/\n/g, '<br>')
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/#{1,3}\s(.+)/g, '<h4>$1</h4>')
+  return sanitizeHtml(rendered)
 }
 
 function animatePlan() {

@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getCheckinHistory, getReview } from '../api'
 import type { CheckinResponse, ReviewResponse } from '../types'
+import { sanitizeHtml } from '../utils/sanitize'
 import gsap from 'gsap'
 
 const router = useRouter()
@@ -69,10 +70,11 @@ async function fetchReview() {
 }
 
 function formatMd(text: string): string {
-  return text
+  const rendered = text
     .replace(/\n/g, '<br>')
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/#{1,3}\s(.+)/g, '<h4>$1</h4>')
+  return sanitizeHtml(rendered)
 }
 
 onMounted(() => {

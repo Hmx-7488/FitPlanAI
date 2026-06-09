@@ -25,8 +25,12 @@ UPLOAD_DIR = Path(__file__).parent.parent.parent / "data" / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _get_vision_llm(max_tokens: int = 1000):
-    """获取 Vision Model（支持图片输入）"""
+def get_vision_llm(max_tokens: int = 1000):
+    """获取 Vision Model（支持图片输入）。
+
+    返回配置好的 ChatOpenAI 实例，使用 DashScope 兼容 API。
+    调用方应根据任务复杂度调整 max_tokens。
+    """
     model = settings.VISION_MODEL or settings.LLM_MODEL
     return ChatOpenAI(
         model=model,
@@ -39,10 +43,95 @@ def _get_vision_llm(max_tokens: int = 1000):
     )
 
 
-def _encode_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
-    """将图片编码为 base64 data URL"""
+# 向后兼容别名，供尚未迁移的调用方使用
+_get_vision_llm = get_vision_llm
+
+
+def encode_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+    """将图片字节编码为 base64 data URL，用于 Vision Model 请求。"""
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     return f"data:{mime_type};base64,{b64}"
+
+
+# 向后兼容别名
+_encode_image = encode_image
+
+
+def _extract_json_array(raw: str) -> list:
+    """从 LLM 响应文本中提取 JSON 数组，处理 markdown 代码块包裹。"""
+    text = raw.strip()
+    json_start = text.find("[")
+    json_end = text.rfind("]") + 1
+    if json_start >= 0 and json_end > json_start:
+        text = text[json_start:json_end]
+    data = json.loads(text)
+    if not isinstance(data, list):
+        raise ValueError(f"Expected JSON array, got {type(data).__name__}")
+    return data
+
+
+async def recognize_food_items(
+    image_bytes: bytes,
+    mime_type: str = "image/jpeg",
+    mode: str = "dish",
+    max_tokens: int = 600,
+) -> list[dict]:
+    """识别图片中的食物/菜品。
+
+    供 meal.py 的 analyze_meal 和 recognize_meal 共用，统一 prompt 和解析逻辑。
+
+    Args:
+        image_bytes: 图片原始字节
+        mime_type: MIME 类型
+        mode: 识别模式 — "dish" 返回菜品级信息（含热量），"ingredient" 返回食材级信息
+        max_tokens: LLM 最大输出 token 数
+
+    Returns:
+        list[dict]: 识别结果列表。dish 模式返回 dish_name/estimated_portion_g/calories_kcal/
+        protein_g/carbs_g/fat_g/confidence；ingredient 模式返回 name/display_name/
+        estimated_weight_g/confidence。
+    """
+    if mode == "dish":
+        prompt = (
+            "请识别图片中的食物/菜品。对于每个菜品，输出 JSON 数组：\n"
+            '[{"dish_name":"番茄炒蛋","estimated_portion_g":220,'
+            '"calories_kcal":260,"protein_g":14,"carbs_g":12,"fat_g":18,"confidence":0.82}]\n\n'
+            "要求：estimated_portion_g 为估算份量克数，calories_kcal 为估算热量，"
+            "protein_g/carbs_g/fat_g 为蛋白质/碳水/脂肪克数，confidence 为置信度 0-1。"
+            "只输出 JSON 数组。"
+        )
+    else:
+        prompt = (
+            "请识别图片中的食物/食材。对于每个食材，输出 JSON 数组：\n"
+            '[{"name":"egg","display_name":"鸡蛋","estimated_weight_g":100,"confidence":0.9},'
+            '{"name":"tomato","display_name":"番茄","estimated_weight_g":150,"confidence":0.85}]\n\n'
+            "要求：\n"
+            "- name: 食材英文名（小写）\n"
+            "- display_name: 食材中文名\n"
+            "- estimated_weight_g: 估算重量（克）\n"
+            "- confidence: 置信度 0-1\n"
+            "只输出 JSON 数组，不要其他文字。如果没有识别到食材，返回空数组 []。"
+        )
+
+    llm = get_vision_llm(max_tokens=max_tokens)
+    image_data = encode_image(image_bytes, mime_type=mime_type)
+
+    message = HumanMessage(content=[
+        {"type": "text", "text": prompt},
+        {"type": "image_url", "image_url": {"url": image_data, "detail": "low"}},
+    ])
+
+    response = llm.invoke([message])
+    raw = response.content.strip()
+    items = _extract_json_array(raw)
+
+    # 校验并清理结果
+    cleaned = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        cleaned.append(item)
+    return cleaned
 
 
 async def recognize_ingredients(
@@ -63,35 +152,12 @@ async def recognize_ingredients(
     saved_path = UPLOAD_DIR / saved_name
     saved_path.write_bytes(image_bytes)
 
-    # 调用 Vision Model
-    llm = _get_vision_llm(max_tokens=800)
-    image_data = _encode_image(image_bytes, mime_type=mime_type)
-
-    prompt = (
-        "请识别图片中的食材。对于每个食材，输出 JSON 数组：\n"
-        '[{"name":"chicken_breast","display_name":"鸡胸肉",'
-        '"estimated_weight_g":150,"confidence":0.92}]\n\n'
-        "要求：name 英文小写下划线，display_name 中文，"
-        "estimated_weight_g 估算克数，confidence 置信度 0-1。"
-        "只输出 JSON 数组。没有食材返回 []"
-    )
-
-    message = HumanMessage(content=[
-        {"type": "text", "text": prompt},
-        {"type": "image_url", "image_url": {"url": image_data, "detail": "low"}},
-    ])
-
-    response = llm.invoke([message])
-    raw = response.content.strip()
-
-    # 解析 JSON
+    # 调用公共接口识别食材
     try:
-        if "```" in raw:
-            json_start = raw.find("[")
-            json_end = raw.rfind("]") + 1
-            raw = raw[json_start:json_end]
-        ingredients_data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
+        ingredients_data = await recognize_food_items(
+            image_bytes, mime_type=mime_type, mode="ingredient", max_tokens=800,
+        )
+    except Exception:
         ingredients_data = []
 
     ingredients = [
@@ -171,7 +237,7 @@ async def generate_recipes(db: AsyncSession, request: RecipeRequest) -> RecipeRe
     recipe_knowledge = "\n".join(retrieve_knowledge(f"食谱 做法 {names}", k=2))
     nutrition_knowledge = "\n".join(retrieve_knowledge(f"食材热量 {names}", k=2))
 
-    llm = _get_vision_llm(max_tokens=1800)
+    llm = get_vision_llm(max_tokens=1800)
     prompt = f"""你是轻食厨师。根据以下食材生成 2-3 个轻食方案。
 
 可用食材：

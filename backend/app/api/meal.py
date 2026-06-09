@@ -1,4 +1,5 @@
 """餐食热量识别 API"""
+import asyncio
 import json
 import logging
 import uuid
@@ -14,9 +15,9 @@ from app.models.user import User, MealLog
 from app.services.image_utils import (
     SUPPORTED_IMAGE_MIME_TYPES,
     image_extension,
-    read_image_dimensions as _read_image_dimensions,
     validate_image,
 )
+from app.services.vision_service import get_vision_llm, recognize_food_items
 from app.tools.calorie_tools import calc_bmr, calc_daily_calorie
 
 router = APIRouter()
@@ -26,7 +27,8 @@ UPLOAD_DIR = Path(__file__).parent.parent.parent / "data" / "uploads" / "meals"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # 临时存储识别结果（生产环境应使用 Redis 或数据库）
-recognition_cache = {}
+recognition_cache: dict[str, dict] = {}
+_cache_lock = asyncio.Lock()
 
 
 MEAL_TYPES = ("breakfast", "lunch", "dinner", "snack")
@@ -42,18 +44,6 @@ def _detect_image_mime(image_bytes: bytes, filename: str | None, content_type: s
 
 def _today() -> str:
     return datetime.now(APP_TIMEZONE).strftime("%Y-%m-%d")
-
-
-def _extract_json_array(raw: str) -> list:
-    text = raw.strip()
-    json_start = text.find("[")
-    json_end = text.rfind("]") + 1
-    if json_start >= 0 and json_end > json_start:
-        text = text[json_start:json_end]
-    data = json.loads(text)
-    if not isinstance(data, list):
-        raise ValueError(f"Vision response must be a JSON array, got {type(data).__name__}")
-    return data
 
 
 class IngredientItem(BaseModel):
@@ -96,39 +86,11 @@ async def analyze_meal(
     saved_path = UPLOAD_DIR / saved_name
     saved_path.write_bytes(content)
 
-    # 调用 Vision Model 识别菜品
+    # 调用 Vision Model 识别菜品（使用公共接口，统一 prompt）
     try:
-        from app.services.vision_service import _get_vision_llm, _encode_image
-        from langchain_core.messages import HumanMessage
-
-        llm = _get_vision_llm(max_tokens=600)
-        image_data = _encode_image(content, mime_type=mime_type)
-
-        prompt = (
-            "请识别图片中的食物/菜品。对于每个菜品，输出 JSON 数组：\n"
-            '[{"dish_name":"番茄炒蛋","estimated_portion_g":220,'
-            '"calories_kcal":260,"protein_g":14,"carbs_g":12,"fat_g":18,"confidence":0.82}]\n\n'
-            "要求：estimated_portion_g 为估算份量克数，calories_kcal 为估算热量，"
-            "protein_g/carbs_g/fat_g 为蛋白质/碳水/脂肪克数，confidence 为置信度 0-1。"
-            "只输出 JSON 数组。"
-        )
-
-        message = HumanMessage(content=[
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": image_data, "detail": "low"}},
-        ])
-
-        response = llm.invoke([message])
-        raw = response.content.strip()
-
-        # 解析 JSON
-        if "```" in raw:
-            json_start = raw.find("[")
-            json_end = raw.rfind("]") + 1
-            raw = raw[json_start:json_end]
-        items = json.loads(raw)
+        items = await recognize_food_items(content, mime_type=mime_type, mode="dish")
     except Exception:
-        # 降级到 mock
+        logger.exception("Vision Model dish recognition failed; falling back to mock. user_id=%s", user_id)
         items = [
             {
                 "dish_name": "家常菜",
@@ -278,47 +240,10 @@ async def recognize_meal(
     saved_path.write_bytes(content)
     logger.info("Meal recognition image saved: path=%s", saved_path)
 
-    # 调用 Vision Model 识别食材
+    # 调用 Vision Model 识别食材（使用公共接口，统一 prompt）
     try:
-        from app.services.vision_service import _get_vision_llm, _encode_image
-        from langchain_core.messages import HumanMessage
-
-        logger.info("Initializing Vision Model for meal recognition")
-        llm = _get_vision_llm(max_tokens=600)
-        image_data = _encode_image(content, mime_type=mime_type)
-        logger.info(
-            "Calling Vision Model for meal recognition: mime=%s data_url_chars=%s",
-            mime_type,
-            len(image_data),
-        )
-
-        prompt = (
-            "请识别图片中的食物/食材。对于每个食材，输出 JSON 数组：\n"
-            '[{"name":"egg","display_name":"鸡蛋","estimated_weight_g":100,"confidence":0.9},'
-            '{"name":"tomato","display_name":"番茄","estimated_weight_g":150,"confidence":0.85}]\n\n'
-            "要求：\n"
-            "- name: 食材英文名（小写）\n"
-            "- display_name: 食材中文名\n"
-            "- estimated_weight_g: 估算重量（克）\n"
-            "- confidence: 置信度 0-1\n"
-            "只输出 JSON 数组，不要其他文字。如果没有识别到食材，返回空数组 []。"
-        )
-
-        message = HumanMessage(content=[
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": image_data, "detail": "low"}},
-        ])
-
-        response = llm.invoke([message])
-        raw = response.content.strip()
-        logger.info("Vision Model raw meal recognition response: %s", raw)
-
-        # 解析 JSON
-        if "```" in raw:
-            json_start = raw.find("[")
-            json_end = raw.rfind("]") + 1
-            raw = raw[json_start:json_end]
-        ingredients = _extract_json_array(raw)
+        logger.info("Calling Vision Model for meal recognition: user_id=%s mime=%s", user_id, mime_type)
+        ingredients = await recognize_food_items(content, mime_type=mime_type, mode="ingredient")
         logger.info(
             "Vision Model meal recognition parsed %s ingredients: %s",
             len(ingredients),
@@ -353,13 +278,14 @@ async def recognize_meal(
 
     # 生成识别 ID 并缓存结果
     recognition_id = uuid.uuid4().hex
-    recognition_cache[recognition_id] = {
-        "user_id": user_id,
-        "meal_type": meal_type,
-        "image_path": str(saved_path),
-        "ingredients": ingredients,
-        "created_at": datetime.utcnow().isoformat(),
-    }
+    async with _cache_lock:
+        recognition_cache[recognition_id] = {
+            "user_id": user_id,
+            "meal_type": meal_type,
+            "image_path": str(saved_path),
+            "ingredients": ingredients,
+            "created_at": datetime.utcnow().isoformat(),
+        }
 
     return {
         "recognition_id": recognition_id,
@@ -373,8 +299,9 @@ async def calculate_meal(
     db: AsyncSession = Depends(get_db),
 ):
     """根据用户确认的食材和重量计算营养"""
-    # 获取缓存的识别结果
-    cached = recognition_cache.get(request.recognition_id)
+    # 获取缓存的识别结果（原子读取）
+    async with _cache_lock:
+        cached = recognition_cache.pop(request.recognition_id, None)
     if not cached:
         raise HTTPException(status_code=404, detail="识别结果已过期，请重新识别")
 
@@ -389,10 +316,7 @@ async def calculate_meal(
 
     # 调用 Vision Model 计算营养
     try:
-        from app.services.vision_service import _get_vision_llm
-        from langchain_core.messages import HumanMessage
-
-        llm = _get_vision_llm(max_tokens=800)
+        llm = get_vision_llm(max_tokens=800)
 
         ingredients_text = "\n".join(
             f"- {i.display_name}: {i.estimated_weight_g}g"
@@ -524,8 +448,7 @@ async def calculate_meal(
     db.add(meal_log)
     await db.commit()
 
-    # 清理缓存
-    del recognition_cache[request.recognition_id]
+    # 缓存已在上方 pop 时清理
 
     return {
         "meal_type": meal_type,
