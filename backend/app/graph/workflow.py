@@ -5,7 +5,8 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from app.core.config import get_settings
 from app.tools.calorie_tools import calc_bmr, calc_daily_calorie, calc_macros
-from app.rag.retriever import retrieve_knowledge
+from app.rag.retriever import get_retriever
+from app.rag.models import GoalType, KnowledgeCategory, SearchQuery
 
 settings = get_settings()
 
@@ -140,25 +141,66 @@ def ask_followup(state: AgentState) -> dict:
 
 
 def retrieve_knowledge_node(state: AgentState) -> dict:
-    """RAG检索相关知识"""
+    """RAG 混合检索 — 每个业务域独立检索当前任务所需知识"""
     profile = state["user_profile"]
+    goal = profile.get("goal_type", "fat_loss")
+    goal_enum = GoalType.muscle_gain if goal == "muscle_gain" else GoalType.fat_loss
+    injuries = profile.get("injuries", [])
 
-    # 基础知识检索
-    food_query = f"食材热量 蛋白质 {profile.get('diet_preference', '')}"
-    exercise_query = f"运动消耗 {profile.get('activity_level', '')}"
+    retriever = get_retriever()
 
-    food_knowledge = "\n".join(retrieve_knowledge(food_query, k=2))
-    exercise_knowledge = "\n".join(retrieve_knowledge(exercise_query, k=2))
-    diet_knowledge = "\n".join(retrieve_knowledge("减脂原则 热量缺口", k=2))
+    # 1) 饮食/食材知识 → nutrition_planning + chinese_meals
+    food_sq = SearchQuery(
+        query=f"食材热量 蛋白质 {profile.get('diet_preference', '')}",
+        goal_type=goal_enum,
+        injuries=injuries,
+        categories=[KnowledgeCategory.nutrition_planning, KnowledgeCategory.chinese_meals],
+        top_k=3,
+    )
+    food_result = retriever.search(food_sq)
+    food_knowledge = "\n".join(d.content for d in food_result.documents)
 
-    # 构建风险相关查询（结合用户伤病和过敏信息）
+    # 2) 运动知识 → exercise_technique + training_principles
+    exercise_sq = SearchQuery(
+        query=f"运动训练 动作技术 {profile.get('activity_level', '')}",
+        goal_type=goal_enum,
+        injuries=injuries,
+        categories=[KnowledgeCategory.exercise_technique, KnowledgeCategory.training_principles],
+        top_k=3,
+    )
+    exercise_result = retriever.search(exercise_sq)
+    exercise_knowledge = "\n".join(d.content for d in exercise_result.documents)
+
+    # 3) 核心原则知识 → fat_loss_standards 或 muscle_gain_standards
+    diet_cats = (
+        [KnowledgeCategory.muscle_gain_standards]
+        if goal == "muscle_gain"
+        else [KnowledgeCategory.fat_loss_standards]
+    )
+    diet_query_text = "增肌热量盈余 蛋白质摄入" if goal == "muscle_gain" else "减脂热量缺口 高蛋白"
+    diet_sq = SearchQuery(
+        query=diet_query_text,
+        goal_type=goal_enum,
+        categories=diet_cats,
+        top_k=3,
+    )
+    diet_result = retriever.search(diet_sq)
+    diet_knowledge = "\n".join(d.content for d in diet_result.documents)
+
+    # 4) 风险知识 → risk_rules，结合伤病和过敏
     risk_parts = ["健康风险 规则"]
-    if profile.get("injuries"):
-        risk_parts.append(" ".join(profile["injuries"]) + " 伤病 禁忌动作")
+    if injuries:
+        risk_parts.append(" ".join(injuries) + " 伤病 禁忌动作")
     if profile.get("allergies"):
         risk_parts.append(" ".join(profile["allergies"]) + " 过敏 替代")
-    risk_query = " ".join(risk_parts)
-    risk_knowledge = "\n".join(retrieve_knowledge(risk_query, k=3))
+    risk_sq = SearchQuery(
+        query=" ".join(risk_parts),
+        injuries=injuries,
+        categories=[KnowledgeCategory.risk_rules],
+        top_k=4,
+    )
+    risk_result = retriever.search(risk_sq)
+    risk_knowledge = "\n".join(d.content for d in risk_result.documents)
 
     return {
         "food_knowledge": food_knowledge[:600],
@@ -579,15 +621,28 @@ async def run_workflow(user_profile: dict) -> dict:
 
 
 def review_retrieve_knowledge(state: ReviewState) -> dict:
-    """复盘节点：检索相关知识"""
+    """复盘节点：检索相关知识（混合检索）"""
     history_text = "\n".join(state["checkin_history"])
-    goal_type = state["user_profile"].get("goal_type", "fat_loss")
+    goal = state["user_profile"].get("goal_type", "fat_loss")
+    goal_enum = GoalType.muscle_gain if goal == "muscle_gain" else GoalType.fat_loss
+    injuries = state["user_profile"].get("injuries", [])
 
-    if goal_type == "muscle_gain":
-        query = f"增肌饮食调整 蛋白质摄入 力量训练恢复 {history_text[:200]}"
+    if goal == "muscle_gain":
+        query_text = f"增肌饮食调整 蛋白质摄入 力量训练恢复 {history_text[:200]}"
+        cats = [KnowledgeCategory.muscle_gain_standards, KnowledgeCategory.training_principles]
     else:
-        query = f"减脂饮食调整 平台期 运动恢复 {history_text[:200]}"
-    knowledge = "\n".join(retrieve_knowledge(query, k=3))
+        query_text = f"减脂饮食调整 平台期 运动恢复 {history_text[:200]}"
+        cats = [KnowledgeCategory.fat_loss_standards, KnowledgeCategory.nutrition_planning]
+
+    sq = SearchQuery(
+        query=query_text,
+        goal_type=goal_enum,
+        injuries=injuries,
+        categories=cats,
+        top_k=4,
+    )
+    result = get_retriever().search(sq)
+    knowledge = "\n".join(d.content for d in result.documents)
 
     return {"related_knowledge": knowledge}
 

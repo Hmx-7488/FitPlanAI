@@ -1,129 +1,101 @@
-"""RAG 知识检索模块 — 基于 Chroma 向量库的语义检索"""
-
+"""RAG hybrid retriever."""
+from __future__ import annotations
+import logging, time
 from pathlib import Path
-from langchain_community.document_loaders import DirectoryLoader, TextLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
-from langchain_openai import OpenAIEmbeddings
-from app.core.config import get_settings
+from app.rag.models import GoalType, RetrievedChunk, SearchQuery, SearchResult
+from app.rag.indexer import load_all_documents
+from app.rag.keyword_index import KeywordIndex
+from app.rag.vectorstore import get_vectorstore_manager
 
-settings = get_settings()
+logger = logging.getLogger(__name__)
+_DATA_DIR = Path(__file__).parent.parent.parent / "data" / "knowledge_docs"
+_INSUFF_THRESHOLD = 0.15
 
-DATA_DIR = Path(__file__).parent.parent.parent / "data" / "docs"
-VECTORSTORE_DIR = Path(__file__).parent.parent.parent / "data" / "vectorstore"
+class HybridRetriever:
+    def __init__(self):
+        self._kw = None; self._ok = False
 
-_vectorstore: Chroma | None = None
+    def initialize(self):
+        if self._ok: return
+        _, chunks, _ = load_all_documents(_DATA_DIR)
+        if not chunks: self._ok = True; return
+        self._kw = KeywordIndex(); self._kw.build(chunks)
+        self._ok = True
 
+    def search(self, q: SearchQuery) -> SearchResult:
+        t0 = time.time(); self.initialize()
+        fdict = self._bfilter(q)
+        vs = get_vectorstore_manager()
+        vr = vs.similarity_search(q.query, k=q.top_k*2, filter_dict=fdict)
+        kr = []
+        if self._kw:
+            hits = self._kw.search(q.query, top_k=q.top_k*2)
+            kr = [(c, s/10) for c, s in hits]
+        mg = self._merge(vr, kr)
+        rr = self._rerank(mg, q)
+        out = []
+        for ch, sc, m in rr[:q.top_k]:
+            ev = ch.evidence_level.value if hasattr(ch.evidence_level, "value") else str(ch.evidence_level)
+            out.append(RetrievedChunk(chunk_id=ch.chunk_id, document_id=ch.document_id, title=ch.title, content=ch.content, source_name=ch.source_name, source_url=ch.source_url, evidence_level=ev, applicable_conditions=[c for c in (ch.applicable_conditions or []) if c], score=round(sc,4), retrieval_method=m))
+        ins = not out or out[0].score < _INSUFF_THRESHOLD
+        return SearchResult(query=q.query, documents=out, insufficient_evidence=ins, total_candidates=len(vr)+len(kr), retrieval_time_ms=round((time.time()-t0)*1000,1))
 
-def _get_embeddings() -> OpenAIEmbeddings:
-    """获取嵌入模型（复用 LLM 的 API 配置）"""
-    return OpenAIEmbeddings(
-        model="text-embedding-v3",
-        openai_api_key=settings.LLM_API_KEY,
-        openai_api_base=settings.LLM_BASE_URL,
-    )
+    def _bfilter(self, q):
+        c = {}
+        if q.categories: c["category"] = {"$in": [x.value for x in q.categories]}
+        return c or None
 
+    def _merge(self, vr, kr):
+        m = {}
+        for ch, sc in vr:
+            if ch.chunk_id in m: ec, es, _ = m[ch.chunk_id]; m[ch.chunk_id] = (ec, max(es,sc), "hybrid")
+            else: m[ch.chunk_id] = (ch, sc, "vector")
+        for ch, sc in kr:
+            if ch.chunk_id in m: ec, es, _ = m[ch.chunk_id]; m[ch.chunk_id] = (ec, max(es,sc), "hybrid")
+            else: m[ch.chunk_id] = (ch, sc, "keyword")
+        return m
 
-def _build_vectorstore() -> Chroma:
-    """从知识文档构建向量库（首次调用时构建，之后持久化）"""
-    VECTORSTORE_DIR.mkdir(parents=True, exist_ok=True)
+    def _rerank(self, mg, q):
+        rs = []
+        for cid, (ch, bs, m) in mg.items():
+            s = bs
+            if q.goal_type and q.goal_type in ch.goal_types: s += 0.1
+            elif GoalType.general in ch.goal_types: s += 0.02
+            if q.injuries:
+                for inj in q.injuries:
+                    for co in (ch.contraindications or []):
+                        if inj.lower() in co.lower(): s -= 0.3
+            ev = ch.evidence_level.value if hasattr(ch.evidence_level, "value") else str(ch.evidence_level)
+            if ev == "guideline": s += 0.05
+            elif ev == "research": s += 0.03
+            elif ev == "expert": s += 0.01
+            if q.categories and ch.category in q.categories: s += 0.08
+            rs.append((ch, max(0.0, min(1.0, s)), m))
+        rs.sort(key=lambda x: x[1], reverse=True)
+        return rs
 
-    # 加载文档
-    loader = DirectoryLoader(
-        str(DATA_DIR),
-        glob="**/*.md",
-        loader_cls=TextLoader,
-        loader_kwargs={"encoding": "utf-8"},
-    )
-    docs = loader.load()
+    def rebuild(self):
+        _, chunks, report = load_all_documents(_DATA_DIR)
+        if not chunks: return {"error": "No chunks", "report": report.model_dump()}
+        vs = get_vectorstore_manager()
+        stats = vs.index_chunks(chunks)
+        self._kw = KeywordIndex(); self._kw.build(chunks)
+        self._ok = True
+        return {"stats": stats.model_dump(), "report": report.model_dump()}
 
-    # 文本切分
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=80,
-        separators=["\n## ", "\n### ", "\n| ", "\n\n", "\n", " "],
-    )
-    splits = text_splitter.split_documents(docs)
+    def get_status(self):
+        vs = get_vectorstore_manager()
+        stats = vs.get_stats()
+        return {"vectorstore": stats.model_dump(), "keyword_index": {"initialized": self._ok, "chunks": len(self._kw._chunks) if self._kw else 0}}
 
-    # 构建 Chroma 向量库并持久化
-    vectorstore = Chroma.from_documents(
-        documents=splits,
-        embedding=_get_embeddings(),
-        persist_directory=str(VECTORSTORE_DIR),
-        collection_name="slim_agent_docs",
-    )
-    return vectorstore
-
-
-def get_vectorstore() -> Chroma:
-    """获取向量库实例（单例）"""
-    global _vectorstore
-    if _vectorstore is not None:
-        return _vectorstore
-
-    # 如果已有持久化的向量库，直接加载
-    if (VECTORSTORE_DIR / "chroma.sqlite3").exists():
-        _vectorstore = Chroma(
-            embedding_function=_get_embeddings(),
-            persist_directory=str(VECTORSTORE_DIR),
-            collection_name="slim_agent_docs",
-        )
-    else:
-        _vectorstore = _build_vectorstore()
-
-    return _vectorstore
-
+_inst = None
+def get_retriever():
+    global _inst
+    if _inst is None: _inst = HybridRetriever()
+    return _inst
 
 def retrieve_knowledge(query: str, k: int = 3) -> list[str]:
-    """基于向量相似度的知识检索"""
-    try:
-        vectorstore = get_vectorstore()
-        results = vectorstore.similarity_search(query, k=k)
-        return [doc.page_content for doc in results]
-    except Exception:
-        # 向量检索失败时回退到关键词匹配
-        return _fallback_retrieve(query, k)
-
-
-def rebuild_vectorstore() -> None:
-    """重建向量库（知识文档更新后调用）"""
-    global _vectorstore
-    _vectorstore = None
-    # 清除旧的 Chroma 缓存，因为需要重新加载 embedding
-    import shutil
-    if VECTORSTORE_DIR.exists():
-        shutil.rmtree(VECTORSTORE_DIR)
-    _vectorstore = _build_vectorstore()
-
-
-def _fallback_retrieve(query: str, k: int = 3) -> list[str]:
-    """降级方案：直接加载文档并关键词匹配"""
-    try:
-        loader = DirectoryLoader(
-            str(DATA_DIR),
-            glob="**/*.md",
-            loader_cls=TextLoader,
-            loader_kwargs={"encoding": "utf-8"},
-        )
-        docs = loader.load()
-
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=500, chunk_overlap=50,
-        )
-        splits = text_splitter.split_documents(docs)
-        all_texts = [doc.page_content for doc in splits]
-
-        keywords = query.lower().split()
-        scored = []
-        for text in all_texts:
-            text_lower = text.lower()
-            score = sum(1 for kw in keywords if kw in text_lower)
-            if score > 0:
-                scored.append((score, text))
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-        if scored:
-            return [text for _, text in scored[:k]]
-        return all_texts[:k]
-    except Exception:
-        return ["暂无相关知识库内容"]
+    from app.rag.models import SearchQuery
+    r = get_retriever()
+    res = r.search(SearchQuery(query=query, top_k=k))
+    return [d.content for d in res.documents]
