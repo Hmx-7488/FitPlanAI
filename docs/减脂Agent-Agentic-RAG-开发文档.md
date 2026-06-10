@@ -1465,7 +1465,7 @@ MVP 实现策略：
 
 ---
 
-## 17. 实现状态总览（v0.5.0）
+## 17. 实现状态总览（v0.6.0）
 
 ### 17.1 已完整实现
 
@@ -1489,14 +1489,18 @@ MVP 实现策略：
 | RAG 检索 | 7 篇知识文档 | Chroma 向量库，语义检索+降级关键词匹配 |
 | 每日打卡 | 饮食运动记录 | 日期、饮食、运动、体重、备注 |
 | AI 复盘 | 分析+建议 | 目标类型分支，复盘总结+次日调整建议 |
+| 身材照片分析 | 多角度 Vision 分析 | 正面/侧面/背面可选上传，综合分析并提供档案数据降级 |
+| AI 动作分析 | 图片/视频 Vision 分析 | 支持关键帧、结构化问题、评分、风险和纠正建议 |
 | 前端 | 10 个页面 | 首页、建档、分析、计划、食材、餐食、身材、动作、打卡、复盘 |
 
-### 17.2 Mock 实现（后续替换）
+### 17.2 当前模型边界与后续增强
 
-| 模块 | 当前实现 | 计划替换为 |
+| 模块 | 当前实现 | 后续增强 |
 | --- | --- | --- |
-| 身材照片分析 | 返回基于 BMI 粗略估算的体脂率范围 | 接入真实体态分析模型（如体脂率估算 CNN） |
-| AI 动作分析 | 返回预设的动作评分和问题项 | 接入 MediaPipe Pose / MoveNet 姿态估计模型 |
+| 身材照片分析 | Vision Model 综合多角度照片，失败时基于档案数据降级 | 经过标注数据验证的体脂或体态专用模型 |
+| AI 动作分析 | Vision Model 分析图片和视频关键帧 | MediaPipe Pose / MoveNet 等关键点模型，用于可计算角度和轨迹 |
+
+当前 Vision Model 输出属于辅助判断。系统不得把模型推测描述为医学测量结果，也不得在没有真实关键点数据时伪造骨架坐标或精确关节角度。
 
 ### 17.3 规划中未实现
 
@@ -1508,3 +1512,273 @@ MVP 实现策略：
 | 打卡围度记录 | 腰围、臀围等围度数据追踪 | P2 |
 | 身材照片对比 | 前后身材照片对比展示 | P2 |
 | 食材缺口智能分析 | ingredient_gap_tool，基于营养目标判断食材是否充足 | P2 |
+
+## 18. 下一阶段：专业 RAG 知识层升级
+
+### 18.1 目标
+
+将当前“7 篇本地 Markdown + Chroma 语义检索”升级为计划生成、分析建议、风险审查和聊天问答共用的专业知识层。
+
+知识层必须解决四个问题：
+
+1. 知识从哪里来，是否可以追溯。
+2. 知识适用于什么目标、人群和条件。
+3. 检索结果是否真正相关。
+4. 模型最终回答是否忠实于检索依据。
+
+### 18.2 知识域
+
+首批知识域：
+
+- `fat_loss_standards`：热量缺口、减重速度、蛋白质、平台期和恢复。
+- `muscle_gain_standards`：热量盈余、增重速度、训练容量和渐进超负荷。
+- `nutrition_planning`：宏量营养素、餐次安排、训练前后饮食和食材替换。
+- `chinese_meals`：家常菜、外卖、食堂、便利店和地域饮食。
+- `training_principles`：频率、容量、强度、RPE/RIR、恢复和周期安排。
+- `exercise_technique`：动作阶段、拍摄要求、常见错误和纠正提示。
+- `risk_rules`：伤病、过敏、特殊人群、极端热量和训练风险。
+
+### 18.3 知识文档与知识块模型
+
+建议为每个文档保存：
+
+```json
+{
+  "document_id": "doc_uuid",
+  "title": "减脂期蛋白质摄入建议",
+  "category": "fat_loss_standards",
+  "source_name": "来源名称",
+  "source_url": "https://example.com/source",
+  "published_at": "2025-01-01",
+  "reviewed_at": "2026-06-10",
+  "evidence_level": "guideline",
+  "version": "1.0",
+  "status": "active"
+}
+```
+
+建议为每个知识块保存：
+
+```json
+{
+  "chunk_id": "chunk_uuid",
+  "document_id": "doc_uuid",
+  "title": "减脂期蛋白质范围",
+  "content": "知识正文",
+  "topic": "protein",
+  "goal_types": ["fat_loss"],
+  "audiences": ["general", "strength_training"],
+  "applicable_conditions": ["calorie_deficit"],
+  "contraindications": [],
+  "tags": ["protein", "fat_loss"],
+  "chunk_version": "1.0"
+}
+```
+
+来源不明确、发布时间无法确认或与医疗诊断高度相关的资料不得作为高置信度依据。
+
+### 18.4 导入与索引链路
+
+```text
+原始资料
+→ 格式解析
+→ 内容清洗
+→ 按标题和语义结构切分
+→ 元数据校验
+→ Embedding
+→ 向量索引
+→ 关键词索引
+→ 版本发布
+```
+
+导入过程需要：
+
+- 内容哈希去重。
+- 文档和知识块版本管理。
+- 重建索引时保留可回滚版本。
+- 输出导入成功、跳过、失败和失效文档统计。
+- API 和日志中不包含密钥或完整敏感用户数据。
+
+### 18.5 检索链路
+
+```text
+用户问题 + 当前页面 + 用户目标 + 健康限制
+→ 查询改写
+→ 元数据过滤
+→ 向量召回
+→ BM25/关键词召回
+→ 合并去重
+→ 重排
+→ 风险规则补充
+→ 返回依据与引用
+```
+
+检索输出建议包含：
+
+```json
+{
+  "query": "减脂期训练后怎么安排晚餐",
+  "documents": [
+    {
+      "chunk_id": "chunk_uuid",
+      "title": "训练后饮食安排",
+      "content": "命中的知识内容",
+      "source_name": "来源名称",
+      "source_url": "https://example.com/source",
+      "evidence_level": "guideline",
+      "applicable_conditions": ["fat_loss", "post_workout"],
+      "score": 0.87
+    }
+  ],
+  "insufficient_evidence": false
+}
+```
+
+### 18.6 接入顺序
+
+1. 饮食计划生成。
+2. 训练计划生成。
+3. 风险审查。
+4. 动作分析纠正建议。
+5. 身材分析后的训练与饮食建议。
+6. 周复盘。
+7. 上下文问答。
+8. 全局聊天 Agent。
+
+### 18.7 评估
+
+建立固定评估集，至少覆盖：
+
+- 减脂、增肌、饮食替换、训练安排、动作风险和特殊限制。
+- 应命中的知识、禁止命中的知识和证据不足问题。
+- 相似问题、模糊问题和包含错误前提的问题。
+
+核心指标：
+
+- Recall@K。
+- 重排后 Top-1/Top-3 相关性。
+- 引用覆盖率和引用正确率。
+- 回答忠实度。
+- 证据不足识别准确率。
+- 不同目标和限制条件下的过滤正确率。
+
+### 18.8 阶段验收
+
+- 每个知识块都有来源、证据等级、适用条件和版本。
+- 检索支持语义、关键词和元数据过滤。
+- 计划生成能够返回使用的依据摘要。
+- 无可靠依据时不生成虚假引用。
+- 固定评估集可以自动运行并输出结果。
+
+## 19. 后续阶段：上下文聊天 Agent
+
+### 19.1 产品定位
+
+聊天 Agent 是已有业务能力的自然语言入口，不是独立的开放式聊天机器人。它必须能够理解用户当前所在页面、当前计划和最近分析结果。
+
+第一版优先提供页面级上下文问答：
+
+- 饮食计划页：解释餐次、替换食材和购物清单。
+- 动作分析页：解释问题、风险和纠正练习。
+- 身材分析页：解释指标与建议边界。
+- 复盘页：解释调整原因和下一阶段重点。
+
+全局聊天入口安排在页面级问答稳定之后。
+
+### 19.2 Agent 上下文
+
+```python
+class ChatAgentState(TypedDict):
+    user_id: int
+    conversation_id: str
+    current_page: str
+    user_profile: dict
+    daily_summary: dict | None
+    active_diet_plan: dict | None
+    active_workout_plan: dict | None
+    latest_analyses: list[dict]
+    retrieved_knowledge: list[dict]
+    pending_change: dict | None
+    messages: list[dict]
+```
+
+不要把完整历史数据和全部对话直接塞入上下文。优先读取当前任务所需数据，并保存结构化会话摘要。
+
+### 19.3 工具分层
+
+只读工具可自动调用：
+
+- `get_user_profile`
+- `get_daily_nutrition_summary`
+- `get_active_diet_plan`
+- `get_active_workout_plan`
+- `get_latest_body_analysis`
+- `get_latest_pose_analysis`
+- `search_knowledge`
+
+草案工具可自动调用，但只返回预览：
+
+- `draft_food_substitution`
+- `draft_meal_adjustment`
+- `draft_workout_adjustment`
+- `compare_plan_changes`
+
+写入工具必须在用户明确确认后调用：
+
+- `apply_diet_plan_change`
+- `apply_workout_plan_change`
+- `save_user_preference`
+
+### 19.4 确认流程
+
+```text
+用户提出调整
+→ Agent 读取当前计划和限制
+→ 检索专业依据
+→ 生成调整草案
+→ 计算修改前后差异
+→ 前端展示变更预览
+→ 用户确认
+→ 写入工具执行
+→ 返回结果与可撤销信息
+```
+
+确认必须绑定具体的 `change_id` 和草案版本，避免用户确认后执行已经变化的旧草案。
+
+### 19.5 API 建议
+
+- `POST /api/chat/conversations`
+- `GET /api/chat/conversations/{id}`
+- `POST /api/chat/conversations/{id}/messages`
+- `GET /api/chat/conversations/{id}/stream`
+- `POST /api/chat/changes/{change_id}/confirm`
+- `POST /api/chat/changes/{change_id}/cancel`
+
+聊天响应至少包含：
+
+- 回复正文。
+- 引用来源。
+- 使用的业务上下文摘要。
+- 工具调用状态。
+- 待确认变更。
+- 风险提示。
+
+### 19.6 安全边界
+
+- 不提供疾病诊断和药物调整建议。
+- 不在用户未确认时修改计划或档案。
+- 不允许模型直接构造数据库更新语句。
+- 工具层重新校验用户身份、字段范围和业务规则。
+- 不把其他用户数据带入上下文。
+- 不保存图片、视频或敏感健康数据的完整内容到聊天消息。
+- 对证据不足的问题明确拒答或建议咨询专业人士。
+
+### 19.7 阶段验收
+
+- Agent 能回答与当前页面和用户计划相关的问题。
+- 回答能够显示知识来源。
+- Agent 能生成食材或训练调整草案。
+- 前端能够展示修改前后差异。
+- 未确认时数据库不发生变化。
+- 用户确认后只执行对应版本的草案。
+- QA 能验证越权、提示词注入、重复确认和过期草案等场景。
