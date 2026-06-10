@@ -178,28 +178,57 @@ export interface BodyPhotoAnalysis {
 }
 
 // AI 动作分析
+export interface PoseMetric {
+  name: string
+  score: number
+  description: string
+}
+
+export interface PoseIssue {
+  title: string
+  severity: 'high' | 'medium' | 'low'
+  description: string
+  timestamp?: number | null
+  impact: string
+  correction: string
+}
+
+export interface PoseCorrection {
+  area: string
+  technique: string
+  drills: string[]
+  sets_reps: string
+  next_filming_tip: string
+}
+
+export interface PosePhase {
+  phase: string
+  observation: string
+}
+
 export interface PoseAnalysis {
   analysis_id: string
   movement_name: string
-  score: number
+  overall_score: number
+  risk_level: 'low' | 'medium' | 'high'
+  summary: string
+  confidence: number
   photo_url?: string
   video_url?: string
   frame_urls?: string[]
   media_type?: 'image' | 'video'
   rep_count_estimate?: number | null
-  phases?: {
-    phase: string
-    observation: string
-  }[]
-  issues: {
-    type: string
-    severity: string
-    description: string
-    suggestion: string
-  }[]
+  analyzed_frames?: number
+  metrics: PoseMetric[]
+  issues: PoseIssue[]
+  corrections: PoseCorrection[]
+  good_points: string[]
+  phases?: PosePhase[]
   coach_cues: string[]
   risk_warnings?: string[]
   is_ai_analysis?: boolean
+  /** @deprecated 使用 overall_score */
+  score?: number
 }
 
 // 餐食热量识别
