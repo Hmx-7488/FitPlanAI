@@ -173,6 +173,24 @@ function severityColor(severity: string): string {
   if (severity === 'medium') return 'var(--color-warning)'
   return 'var(--color-text-secondary)'
 }
+
+function riskLevelLabel(level: string): string {
+  if (level === 'high') return '高风险'
+  if (level === 'medium') return '中风险'
+  return '低风险'
+}
+
+function riskLevelColor(level: string): string {
+  if (level === 'high') return 'var(--color-danger)'
+  if (level === 'medium') return 'var(--color-warning)'
+  return 'oklch(0.55 0.14 145)'
+}
+
+function metricColor(score: number): string {
+  if (score >= 80) return 'oklch(0.55 0.14 145)'
+  if (score >= 60) return 'var(--color-warning)'
+  return 'var(--color-danger)'
+}
 </script>
 
 <template>
@@ -228,6 +246,9 @@ function severityColor(severity: string): string {
         <h2>{{ result.movement_name }} 分析结果</h2>
         <span class="ai-badge" v-if="result.is_ai_analysis">AI 视觉分析</span>
         <span class="mock-badge" v-else>模板分析</span>
+        <span class="risk-badge" :style="{ color: riskLevelColor(result.risk_level), borderColor: riskLevelColor(result.risk_level) }">
+          {{ riskLevelLabel(result.risk_level) }}
+        </span>
       </div>
 
       <div class="photo-preview" v-if="result.video_url">
@@ -239,13 +260,47 @@ function severityColor(severity: string): string {
 
       <!-- Score -->
       <div class="score-card">
-        <div class="score-value">{{ result.score }}</div>
+        <div class="score-value">{{ result.overall_score }}</div>
         <div class="score-label">动作评分（满分 100）</div>
-        <div class="score-meta" v-if="result.media_type === 'video' && result.rep_count_estimate">
-          识别到约 {{ result.rep_count_estimate }} 次动作
+        <p v-if="result.summary" class="score-summary">{{ result.summary }}</p>
+        <div class="score-meta-row">
+          <span v-if="result.confidence != null" class="score-meta-item">
+            置信度 {{ Math.round(result.confidence * 100) }}%
+          </span>
+          <span v-if="result.media_type === 'video' && result.rep_count_estimate" class="score-meta-item">
+            约 {{ result.rep_count_estimate }} 次动作
+          </span>
+          <span v-if="result.analyzed_frames" class="score-meta-item">
+            分析 {{ result.analyzed_frames }} 帧
+          </span>
         </div>
         <div class="score-bar-track">
-          <div class="score-bar-fill" :style="{ width: result.score + '%' }"></div>
+          <div class="score-bar-fill" :style="{ width: result.overall_score + '%' }"></div>
+        </div>
+      </div>
+
+      <!-- Metrics -->
+      <div class="card" v-if="result.metrics?.length">
+        <h3>维度评分</h3>
+        <div class="metrics-grid">
+          <div v-for="m in result.metrics" :key="m.name" class="metric-item">
+            <div class="metric-header">
+              <span class="metric-name">{{ m.name }}</span>
+              <span class="metric-score" :style="{ color: metricColor(m.score) }">{{ m.score }}</span>
+            </div>
+            <div class="metric-bar-track">
+              <div class="metric-bar-fill" :style="{ width: m.score + '%', background: metricColor(m.score) }"></div>
+            </div>
+            <p class="metric-desc">{{ m.description }}</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Good points -->
+      <div class="card card--good" v-if="result.good_points?.length">
+        <h3>✅ 做得好的方面</h3>
+        <div class="good-points">
+          <span v-for="p in result.good_points" :key="p" class="good-tag">{{ p }}</span>
         </div>
       </div>
 
@@ -262,11 +317,32 @@ function severityColor(severity: string): string {
       <div class="card" v-if="result.issues.length">
         <h3>问题项</h3>
         <div v-for="(issue, i) in result.issues" :key="i" class="issue-item">
-          <div class="issue-severity" :style="{ color: severityColor(issue.severity) }">
-            {{ issue.severity === 'high' ? '⚠️ 严重' : issue.severity === 'medium' ? '⚡ 中等' : '💡 轻微' }}
+          <div class="issue-top">
+            <span class="issue-title">{{ issue.title }}</span>
+            <span class="issue-severity" :style="{ color: severityColor(issue.severity) }">
+              {{ issue.severity === 'high' ? '⚠️ 严重' : issue.severity === 'medium' ? '⚡ 中等' : '💡 轻微' }}
+            </span>
+            <span v-if="issue.timestamp != null" class="issue-timestamp">{{ issue.timestamp }}s</span>
           </div>
           <p class="issue-desc">{{ issue.description }}</p>
-          <p class="issue-suggestion">💡 {{ issue.suggestion }}</p>
+          <p v-if="issue.impact" class="issue-impact">影响：{{ issue.impact }}</p>
+          <p class="issue-correction">💡 {{ issue.correction }}</p>
+        </div>
+      </div>
+
+      <!-- Corrections -->
+      <div class="card card--corrections" v-if="result.corrections?.length">
+        <h3>🎯 纠正训练建议</h3>
+        <div v-for="(c, i) in result.corrections" :key="i" class="correction-item">
+          <div class="correction-area">{{ c.area }}</div>
+          <p class="correction-technique">{{ c.technique }}</p>
+          <div v-if="c.drills?.length" class="correction-drills">
+            <span v-for="d in c.drills" :key="d" class="drill-tag">{{ d }}</span>
+          </div>
+          <div class="correction-meta">
+            <span v-if="c.sets_reps" class="correction-sets">📋 {{ c.sets_reps }}</span>
+            <span v-if="c.next_filming_tip" class="correction-tip">🎬 {{ c.next_filming_tip }}</span>
+          </div>
         </div>
       </div>
 
@@ -321,6 +397,7 @@ function severityColor(severity: string): string {
 .result-header h2 { font-size: var(--text-xl); font-weight: 700; }
 .mock-badge { font-size: var(--text-xs); font-weight: 600; padding: 2px 8px; background: oklch(0.93 0.06 80); color: oklch(0.45 0.12 80); border-radius: var(--radius-sm); }
 .ai-badge { font-size: var(--text-xs); font-weight: 600; padding: 2px 8px; background: oklch(0.93 0.06 145); color: oklch(0.40 0.12 145); border-radius: var(--radius-sm); }
+.risk-badge { font-size: var(--text-xs); font-weight: 700; padding: 2px 10px; border: 1.5px solid; border-radius: var(--radius-sm); background: transparent; }
 
 .photo-preview img,
 .photo-preview video { max-width: 100%; max-height: 360px; border-radius: var(--radius-sm); }
@@ -328,20 +405,52 @@ function severityColor(severity: string): string {
 .score-card { text-align: center; background: var(--color-surface); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-md); padding: var(--space-6); }
 .score-value { font-family: var(--font-mono); font-size: 56px; font-weight: 800; color: var(--color-accent); line-height: 1; }
 .score-label { font-size: var(--text-sm); color: var(--color-text-tertiary); margin-top: var(--space-2); margin-bottom: var(--space-4); }
-.score-meta { font-size: var(--text-sm); color: var(--color-text-secondary); margin-top: calc(-1 * var(--space-2)); margin-bottom: var(--space-3); }
 .score-bar-track { height: 6px; background: var(--color-border-subtle); border-radius: 3px; overflow: hidden; }
 .score-bar-fill { height: 100%; background: var(--color-accent); border-radius: 3px; transition: width var(--duration-normal) var(--ease-out); }
+.score-summary { font-size: var(--text-sm); color: var(--color-text-secondary); line-height: var(--leading-relaxed); margin-top: var(--space-3); margin-bottom: var(--space-2); }
+.score-meta-row { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-3); margin-top: var(--space-2); margin-bottom: var(--space-3); }
+.score-meta-item { font-size: var(--text-xs); color: var(--color-text-tertiary); }
 
 .card { background: var(--color-surface); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-md); padding: var(--space-5); }
 .card h3 { font-size: var(--text-md); font-weight: 700; margin-bottom: var(--space-3); }
 .card--accent { background: var(--color-accent-subtle); border-color: oklch(0.90 0.03 145); }
 .card--warn { background: oklch(0.95 0.04 80); border-color: oklch(0.90 0.06 80); }
+.card--good { background: oklch(0.96 0.03 145); border-color: oklch(0.90 0.04 145); }
+.card--corrections { background: oklch(0.96 0.02 250); border-color: oklch(0.90 0.03 250); }
+
+/* Metrics */
+.metrics-grid { display: flex; flex-direction: column; gap: var(--space-4); }
+.metric-item { display: flex; flex-direction: column; gap: var(--space-1); }
+.metric-header { display: flex; justify-content: space-between; align-items: baseline; }
+.metric-name { font-size: var(--text-sm); font-weight: 600; color: var(--color-text-primary); }
+.metric-score { font-size: var(--text-lg); font-weight: 800; font-family: var(--font-mono); }
+.metric-bar-track { height: 5px; background: var(--color-border-subtle); border-radius: 3px; overflow: hidden; }
+.metric-bar-fill { height: 100%; border-radius: 3px; transition: width var(--duration-normal) var(--ease-out); }
+.metric-desc { font-size: var(--text-xs); color: var(--color-text-tertiary); margin: 0; }
+
+/* Good points */
+.good-points { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.good-tag { font-size: var(--text-sm); font-weight: 600; padding: 4px 12px; background: oklch(0.92 0.06 145); color: oklch(0.38 0.12 145); border-radius: var(--radius-sm); }
 
 .issue-item { padding: var(--space-3) 0; border-bottom: 1px solid var(--color-border-subtle); }
 .issue-item:last-child { border-bottom: none; padding-bottom: 0; }
-.issue-severity { font-size: var(--text-sm); font-weight: 600; margin-bottom: var(--space-1); }
-.issue-desc { font-size: var(--text-base); color: var(--color-text-primary); margin-bottom: var(--space-1); }
-.issue-suggestion { font-size: var(--text-sm); color: var(--color-text-secondary); }
+.issue-top { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-1); flex-wrap: wrap; }
+.issue-title { font-size: var(--text-base); font-weight: 700; color: var(--color-text-primary); }
+.issue-severity { font-size: var(--text-xs); font-weight: 600; }
+.issue-timestamp { font-size: var(--text-xs); color: var(--color-text-tertiary); font-family: var(--font-mono); padding: 1px 6px; background: var(--color-border-subtle); border-radius: var(--radius-sm); }
+.issue-desc { font-size: var(--text-sm); color: var(--color-text-primary); margin-bottom: var(--space-1); }
+.issue-impact { font-size: var(--text-xs); color: var(--color-text-tertiary); margin-bottom: var(--space-1); }
+.issue-correction { font-size: var(--text-sm); color: var(--color-accent); }
+
+/* Corrections */
+.correction-item { padding: var(--space-3) 0; border-bottom: 1px solid oklch(0.92 0.01 250); }
+.correction-item:last-child { border-bottom: none; padding-bottom: 0; }
+.correction-area { font-size: var(--text-sm); font-weight: 700; color: var(--color-text-primary); margin-bottom: var(--space-1); }
+.correction-technique { font-size: var(--text-sm); color: var(--color-text-secondary); line-height: var(--leading-relaxed); margin-bottom: var(--space-2); }
+.correction-drills { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-2); }
+.drill-tag { font-size: var(--text-xs); font-weight: 600; padding: 3px 10px; background: oklch(0.92 0.04 250); color: oklch(0.40 0.10 250); border-radius: var(--radius-sm); }
+.correction-meta { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+.correction-sets, .correction-tip { font-size: var(--text-xs); color: var(--color-text-tertiary); }
 
 .phase-item { padding: var(--space-3) 0; border-bottom: 1px solid var(--color-border-subtle); }
 .phase-item:last-child { border-bottom: none; padding-bottom: 0; }
