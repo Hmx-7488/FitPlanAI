@@ -1465,7 +1465,7 @@ MVP 实现策略：
 
 ---
 
-## 17. 实现状态总览（v0.6.0）
+## 17. 实现状态总览（v0.7.0）
 
 ### 17.1 已完整实现
 
@@ -1486,7 +1486,10 @@ MVP 实现策略：
 | 菜谱图片 | 占位图+生成提示词 | 每个菜谱有 generation_prompt |
 | 餐食识别 | 热量估算 | Vision Model 识别已吃菜品，估算热量 |
 | 每日缺口 | 热量汇总 | 当日摄入、剩余配额、缺口状态、调整建议 |
-| RAG 检索 | 7 篇知识文档 | Chroma 向量库，语义检索+降级关键词匹配 |
+| RAG 知识层 | 专业混合检索 | 9 篇文档 43 知识块，7 域 5 级证据，向量+关键词+重排序 |
+| RAG 业务接入 | 工作流精准检索 | 饮食/训练/风险节点独立 SearchQuery，按目标和伤病过滤 |
+| RAG 管理 API | 知识库运维 | rebuild / search / status / documents / evaluate 五个端点 |
+| RAG 评估 | 自动化评估集 | 10 个测试用例，覆盖减脂/增肌/饮食/训练/风险/证据不足 |
 | 每日打卡 | 饮食运动记录 | 日期、饮食、运动、体重、备注 |
 | AI 复盘 | 分析+建议 | 目标类型分支，复盘总结+次日调整建议 |
 | 身材照片分析 | 多角度 Vision 分析 | 正面/侧面/背面可选上传，综合分析并提供档案数据降级 |
@@ -1506,169 +1509,361 @@ MVP 实现策略：
 
 | 模块 | 说明 | 优先级 |
 | --- | --- | --- |
-| 中国菜品热量库 | 常见家常菜、外卖、食堂菜的热量数据 | P1 |
-| 地域饮食库 | 南方/北方/川湘/粤式饮食习惯知识 | P1 |
 | 菜谱成品图生成 | 接入图片生成模型生成真实菜品图 | P2 |
 | 打卡围度记录 | 腰围、臀围等围度数据追踪 | P2 |
 | 身材照片对比 | 前后身材照片对比展示 | P2 |
 | 食材缺口智能分析 | ingredient_gap_tool，基于营养目标判断食材是否充足 | P2 |
+| 上下文聊天 Agent | 页面级问答 + 全局聊天入口 | P1 |
+| 动作分析 RAG 接入 | 动作分析纠正建议接入知识层 | P2 |
+| 身材分析 RAG 接入 | 身材分析后的训练与饮食建议接入知识层 | P2 |
 
-## 18. 下一阶段：专业 RAG 知识层升级
+## 18. 专业 RAG 知识层实现（v0.7.0）
 
-### 18.1 目标
+### 18.1 架构概览
 
-将当前“7 篇本地 Markdown + Chroma 语义检索”升级为计划生成、分析建议、风险审查和聊天问答共用的专业知识层。
-
-知识层必须解决四个问题：
-
-1. 知识从哪里来，是否可以追溯。
-2. 知识适用于什么目标、人群和条件。
-3. 检索结果是否真正相关。
-4. 模型最终回答是否忠实于检索依据。
-
-### 18.2 知识域
-
-首批知识域：
-
-- `fat_loss_standards`：热量缺口、减重速度、蛋白质、平台期和恢复。
-- `muscle_gain_standards`：热量盈余、增重速度、训练容量和渐进超负荷。
-- `nutrition_planning`：宏量营养素、餐次安排、训练前后饮食和食材替换。
-- `chinese_meals`：家常菜、外卖、食堂、便利店和地域饮食。
-- `training_principles`：频率、容量、强度、RPE/RIR、恢复和周期安排。
-- `exercise_technique`：动作阶段、拍摄要求、常见错误和纠正提示。
-- `risk_rules`：伤病、过敏、特殊人群、极端热量和训练风险。
-
-### 18.3 知识文档与知识块模型
-
-建议为每个文档保存：
-
-```json
-{
-  "document_id": "doc_uuid",
-  "title": "减脂期蛋白质摄入建议",
-  "category": "fat_loss_standards",
-  "source_name": "来源名称",
-  "source_url": "https://example.com/source",
-  "published_at": "2025-01-01",
-  "reviewed_at": "2026-06-10",
-  "evidence_level": "guideline",
-  "version": "1.0",
-  "status": "active"
-}
-```
-
-建议为每个知识块保存：
-
-```json
-{
-  "chunk_id": "chunk_uuid",
-  "document_id": "doc_uuid",
-  "title": "减脂期蛋白质范围",
-  "content": "知识正文",
-  "topic": "protein",
-  "goal_types": ["fat_loss"],
-  "audiences": ["general", "strength_training"],
-  "applicable_conditions": ["calorie_deficit"],
-  "contraindications": [],
-  "tags": ["protein", "fat_loss"],
-  "chunk_version": "1.0"
-}
-```
-
-来源不明确、发布时间无法确认或与医疗诊断高度相关的资料不得作为高置信度依据。
-
-### 18.4 导入与索引链路
+将原有”7 篇本地 Markdown + Chroma 语义检索”升级为结构化、可追溯、可评估的专业知识层。
 
 ```text
-原始资料
-→ 格式解析
-→ 内容清洗
-→ 按标题和语义结构切分
-→ 元数据校验
-→ Embedding
-→ 向量索引
-→ 关键词索引
-→ 版本发布
+知识文档（YAML frontmatter + Markdown）
+→ indexer.py 解析 frontmatter + 按标题语义分块
+→ models.py Pydantic 校验（来源、证据等级、适用条件）
+→ vectorstore.py Chroma 向量索引（安全重建 tmp→verify→swap）
+→ keyword_index.py BM25 关键词索引（中文 bigram 分词）
+→ retriever.py 混合检索（向量+关键词+合并+重排序）
+→ workflow.py 业务节点按目标/伤病/类别精准检索
+→ evaluate.py 自动化评估集
 ```
 
-导入过程需要：
+### 18.2 知识域与证据等级
 
-- 内容哈希去重。
-- 文档和知识块版本管理。
-- 重建索引时保留可回滚版本。
-- 输出导入成功、跳过、失败和失效文档统计。
-- API 和日志中不包含密钥或完整敏感用户数据。
+7 个知识域：
 
-### 18.5 检索链路
+| 域 | 说明 |
+| --- | --- |
+| `fat_loss_standards` | 热量缺口、减重速度、蛋白质、平台期和恢复 |
+| `muscle_gain_standards` | 热量盈余、增重速度、训练容量和渐进超负荷 |
+| `nutrition_planning` | 宏量营养素、餐次安排、训练前后饮食和食材替换 |
+| `chinese_meals` | 家常菜、外卖、食堂、便利店和地域饮食 |
+| `training_principles` | 频率、容量、强度、RPE/RIR、恢复和周期安排 |
+| `exercise_technique` | 动作阶段、拍摄要求、常见错误和纠正提示 |
+| `risk_rules` | 伤病、过敏、特殊人群、极端热量和训练风险 |
+
+5 级证据等级：
+
+| 等级 | 说明 | 要求 |
+| --- | --- | --- |
+| `guideline` | 权威指南 / 行业标准 | 必须有来源 |
+| `research` | 研究文献 / 实验数据 | 必须有来源 |
+| `expert` | 专家建议 / 教练经验 | 建议有来源 |
+| `community` | 社区经验 / 常见做法 | 无要求 |
+| `internal` | 项目内部规则 | 无要求 |
+
+### 18.3 数据模型
+
+KnowledgeDocument（文档元数据）：
+
+```python
+class KnowledgeDocument(BaseModel):
+    document_id: str          # 基于内容哈希的稳定 ID
+    title: str
+    category: KnowledgeCategory
+    source_name: str
+    source_url: str
+    published_at: Optional[date]
+    reviewed_at: Optional[date]
+    evidence_level: EvidenceLevel
+    version: str
+    status: DocStatus
+    content_hash: str
+    chunk_count: int
+```
+
+KnowledgeChunk（检索最小单元）：
+
+```python
+class KnowledgeChunk(BaseModel):
+    chunk_id: str             # 基于内容哈希的稳定 ID
+    document_id: str
+    title: str
+    content: str
+    topic: str
+    goal_types: list[GoalType]
+    audiences: list[Audience]
+    applicable_conditions: list[str]
+    contraindications: list[str]
+    tags: list[str]
+    category: KnowledgeCategory
+    evidence_level: EvidenceLevel
+    source_name: str
+    source_url: str
+    content_hash: str
+```
+
+SearchQuery（检索请求）：
+
+```python
+class SearchQuery(BaseModel):
+    query: str
+    goal_type: Optional[GoalType]
+    current_page: str
+    training_level: Optional[str]
+    dietary_restrictions: list[str]
+    injuries: list[str]
+    categories: list[KnowledgeCategory]
+    top_k: int = 5
+```
+
+ID 生成规则：`make_stable_id()` 基于 SHA-256 哈希，相同内容永远生成相同 ID。`content_hash()` 用于去重判断。
+
+### 18.4 知识文档
+
+9 篇专业知识文档，43 个知识块：
+
+| 文档 | 域 | 证据等级 | 知识块 |
+| --- | --- | --- | --- |
+| 减脂核心原则 | fat_loss_standards | guideline | 5 |
+| 减脂蛋白质摄入 | fat_loss_standards | research | 4 |
+| 增肌营养指南 | muscle_gain_standards | guideline | 4 |
+| 膳食计划指南 | nutrition_planning | guideline | 3 |
+| 中国饮食指南 | chinese_meals | expert | 6 |
+| 训练原则 | training_principles | guideline | 7 |
+| 动作技术指南 | exercise_technique | expert | 5 |
+| 健康风险规则 | risk_rules | guideline | 5 |
+| 运动风险规则 | risk_rules | guideline | 4 |
+
+文档格式（YAML frontmatter + Markdown）：
+
+```markdown
+---
+title: 减脂核心原则
+category: fat_loss_standards
+source_name: ACSM Guidelines
+source_url: https://www.acsm.org
+published_at: 2024-01-01
+reviewed_at: 2026-06-10
+evidence_level: guideline
+version: “1.0”
+status: active
+tags: [fat_loss, calorie_deficit, safe_weight_loss]
+goal_types: [fat_loss]
+audiences: [general]
+---
+
+## 热量缺口与安全减重
+
+知识正文...
+```
+
+### 18.5 导入与索引
+
+`indexer.py` 处理流程：
+
+1. 解析 YAML frontmatter（正则 `^---\s*\n(.*?)\n---\s*\n`）。
+2. 构建 KnowledgeDocument，校验证据等级与来源一致性。
+3. 按 `##` 和 `###` 标题语义分块，每个块继承文档元数据。
+4. 从标题和正文关键词推断 `goal_types`（减脂/增肌/通用）。
+5. 内容哈希去重，跳过已存在的块。
+
+`vectorstore.py` 安全重建模式：
 
 ```text
-用户问题 + 当前页面 + 用户目标 + 健康限制
-→ 查询改写
-→ 元数据过滤
-→ 向量召回
-→ BM25/关键词召回
-→ 合并去重
-→ 重排
-→ 风险规则补充
-→ 返回依据与引用
+1. 在 vectorstore_tmp/ 构建新索引
+2. 验证文档数量 ≥ 1
+3. 关闭旧 store 释放文件锁（Windows 兼容）
+4. 旧目录 → vectorstore_backup/
+5. tmp → vectorstore/
+6. 重新打开新 store
+7. 删除 backup
 ```
 
-检索输出建议包含：
+失败时自动回滚：删除 tmp，恢复 backup。
+
+DashScope embedding API 兼容处理：
+
+- `check_embedding_ctx_length=False`：DashScope 不接受 token IDs，需直接传文本。
+- `chunk_size=10`：DashScope embedding API 限制 batch size ≤ 10。
+
+`keyword_index.py` BM25 索引：
+
+- 参数：k1=1.5, b=0.75。
+- 分词：非字母数字 + CJK 字符切分 + 中文 bigram。
+- IDF 加权 + 文档长度归一化。
+
+### 18.6 混合检索
+
+`retriever.py` HybridRetriever 检索流程：
+
+```text
+SearchQuery
+→ 构建元数据过滤器（categories）
+→ 向量召回（2×top_k）
+→ 关键词召回（2×top_k，分数 /10 归一化）
+→ 按 chunk_id 合并去重（取较高分，标记 vector/keyword/hybrid）
+→ 多维重排序：
+    +0.10  goal_type 匹配
+    +0.02  general 通用匹配
+    -0.30  伤病禁忌惩罚
+    +0.05  guideline 证据等级
+    +0.03  research 证据等级
+    +0.01  expert 证据等级
+    +0.08  category 匹配
+→ 截断 top_k
+→ insufficient_evidence 检测（阈值 0.15）
+→ 返回 SearchResult
+```
+
+返回结构：
 
 ```json
 {
-  "query": "减脂期训练后怎么安排晚餐",
-  "documents": [
+  “query”: “减脂期每天应该摄入多少热量”,
+  “documents”: [
     {
-      "chunk_id": "chunk_uuid",
-      "title": "训练后饮食安排",
-      "content": "命中的知识内容",
-      "source_name": "来源名称",
-      "source_url": "https://example.com/source",
-      "evidence_level": "guideline",
-      "applicable_conditions": ["fat_loss", "post_workout"],
-      "score": 0.87
+      “chunk_id”: “chk_xxx”,
+      “title”: “热量缺口范围”,
+      “content”: “安全热量缺口 300-500 kcal...”,
+      “source_name”: “ACSM Guidelines”,
+      “evidence_level”: “guideline”,
+      “score”: 0.908,
+      “retrieval_method”: “hybrid”
     }
   ],
-  "insufficient_evidence": false
+  “insufficient_evidence”: false,
+  “total_candidates”: 30,
+  “retrieval_time_ms”: 120.5
 }
 ```
 
-### 18.6 接入顺序
+### 18.7 业务接入
 
-1. 饮食计划生成。
-2. 训练计划生成。
-3. 风险审查。
-4. 动作分析纠正建议。
-5. 身材分析后的训练与饮食建议。
-6. 周复盘。
-7. 上下文问答。
-8. 全局聊天 Agent。
+工作流 `workflow.py` 中三个节点已接入混合检索：
 
-### 18.7 评估
+1. `retrieve_knowledge_node`：按业务域独立检索。
 
-建立固定评估集，至少覆盖：
+```python
+# 饮食知识 → nutrition_planning + chinese_meals
+food_sq = SearchQuery(
+    query=f”食材热量 蛋白质 {diet_preference}”,
+    goal_type=goal_enum,
+    injuries=injuries,
+    categories=[KnowledgeCategory.nutrition_planning, KnowledgeCategory.chinese_meals],
+    top_k=3,
+)
 
-- 减脂、增肌、饮食替换、训练安排、动作风险和特殊限制。
-- 应命中的知识、禁止命中的知识和证据不足问题。
-- 相似问题、模糊问题和包含错误前提的问题。
+# 运动知识 → exercise_technique + training_principles
+exercise_sq = SearchQuery(
+    query=f”运动训练 动作技术 {activity_level}”,
+    goal_type=goal_enum,
+    injuries=injuries,
+    categories=[KnowledgeCategory.exercise_technique, KnowledgeCategory.training_principles],
+    top_k=3,
+)
 
-核心指标：
+# 核心原则 → fat_loss_standards 或 muscle_gain_standards
+diet_sq = SearchQuery(
+    query=diet_query_text,
+    goal_type=goal_enum,
+    categories=diet_cats,
+    top_k=3,
+)
 
-- Recall@K。
-- 重排后 Top-1/Top-3 相关性。
-- 引用覆盖率和引用正确率。
-- 回答忠实度。
-- 证据不足识别准确率。
-- 不同目标和限制条件下的过滤正确率。
+# 风险知识 → risk_rules
+risk_sq = SearchQuery(
+    query=” “.join(risk_parts),
+    injuries=injuries,
+    categories=[KnowledgeCategory.risk_rules],
+    top_k=4,
+)
+```
 
-### 18.8 阶段验收
+2. `review_retrieve_knowledge`：复盘节点按目标类型检索调整建议。
 
-- 每个知识块都有来源、证据等级、适用条件和版本。
-- 检索支持语义、关键词和元数据过滤。
-- 计划生成能够返回使用的依据摘要。
-- 无可靠依据时不生成虚假引用。
-- 固定评估集可以自动运行并输出结果。
+3. 向后兼容：`retrieve_knowledge(query, k)` 旧接口内部调用 HybridRetriever，`vision_service.py` 和 `calorie_tools.py` 无需修改。
+
+### 18.8 知识管理 API
+
+| 端点 | 方法 | 说明 |
+| --- | --- | --- |
+| `/api/knowledge/rebuild` | POST | 重建向量+关键词索引 |
+| `/api/knowledge/search` | POST | 混合检索，支持 SearchQuery 全字段 |
+| `/api/knowledge/status` | GET | 索引状态（文档数、知识块数、分类统计） |
+| `/api/knowledge/documents` | GET | 列出所有知识文档元数据 |
+| `/api/knowledge/evaluate` | POST | 运行评估套件 |
+
+### 18.9 评估集
+
+10 个测试用例：
+
+| 用例 | 查询 | 期望 |
+| --- | --- | --- |
+| fat_loss_calorie | 减脂期每天应该摄入多少热量 | 命中 fat_loss_standards |
+| muscle_gain_surplus | 增肌期热量盈余多少合适 | 命中 muscle_gain_standards |
+| chinese_meal_substitution | 减脂期外卖怎么点餐 | 命中 chinese_meals |
+| beginner_training | 新手每周训练几天合适 | 命中 training_principles |
+| knee_injury_limit | 膝盖受伤后可以做什么运动 | 命中 risk_rules |
+| exercise_risk | 深蹲膝盖内扣怎么纠正 | 命中 exercise_technique |
+| insufficient_evidence | 量子力学对减脂的影响 | 低置信度（score < 0.65） |
+| wrong_premise | 每天只吃500大卡能快速减脂吗 | 命中 risk_rules + fat_loss_standards |
+| protein_intake | 减脂期每公斤体重需要多少蛋白质 | 命中 fat_loss_standards |
+| back_injury_deadlift | 腰椎间盘突出能做硬拉吗 | 命中 risk_rules + exercise_technique |
+
+当前评估结果：10/10 通过，全部为 hybrid 或 keyword 检索命中。
+
+### 18.10 测试覆盖
+
+29 个单元测试（19 个 RAG + 10 个原有）：
+
+| 测试类 | 数量 | 覆盖 |
+| --- | --- | --- |
+| StableIdTests | 3 | ID 稳定性、哈希一致性 |
+| DocumentModelTests | 3 | 文档校验、证据等级来源检查 |
+| ChunkModelTests | 2 | 自动 ID、标签归一化 |
+| FrontmatterTests | 2 | YAML 解析、无 frontmatter 降级 |
+| DocumentLoadingTests | 5 | 全量加载、分类覆盖、元数据完整性、去重、单文档加载 |
+| KeywordIndexTests | 3 | 关键词匹配、无关查询、中文匹配 |
+| SearchQueryTests | 1 | 默认值 |
+
+### 18.11 模块文件清单
+
+```bash
+backend/app/rag/
+├─ __init__.py          # 导出所有模型和检索函数
+├─ models.py            # Pydantic 模型（文档/切块/检索/结果/统计）
+├─ indexer.py           # YAML 解析 + 语义分块 + 文档加载
+├─ keyword_index.py     # BM25 关键词索引（中文 bigram）
+├─ vectorstore.py       # Chroma 向量库管理（安全重建）
+├─ retriever.py         # 混合检索器（向量+关键词+重排序）
+└─ evaluate.py          # 评估套件（10 个测试用例）
+
+backend/app/api/
+└─ knowledge.py         # 知识管理 API（5 个端点）
+
+backend/data/knowledge_docs/
+├─ fat_loss_core_principles.md
+├─ fat_loss_protein_intake.md
+├─ muscle_gain_nutrition.md
+├─ meal_planning_guide.md
+├─ chinese_meal_guide.md
+├─ training_principles.md
+├─ exercise_technique.md
+├─ health_risk_rules.md
+└─ exercise_risk_rules.md
+
+backend/tests/
+└─ test_rag.py          # 19 个 RAG 单元测试
+```
+
+### 18.12 验收清单
+
+- [x] 每个知识块都有来源、证据等级、适用条件和版本。
+- [x] 检索支持语义、关键词和元数据过滤。
+- [x] 工作流节点使用 SearchQuery 精准检索（按目标/伤病/类别）。
+- [x] 无可靠依据时返回 insufficient_evidence。
+- [x] 固定评估集可以自动运行并输出结果（10/10 通过）。
+- [x] 向后兼容旧 retrieve_knowledge 接口。
+- [x] 安全重建模式支持回滚。
+- [x] DashScope embedding API 兼容。
+- [x] Windows 文件锁兼容。
 
 ## 19. 后续阶段：上下文聊天 Agent
 
