@@ -1,3 +1,9 @@
+import os as _os
+import certifi as _certifi
+# 修复 WSL/Windows 混合环境下 OpenSSL 找不到 CA 证书的问题
+_os.environ.setdefault("SSL_CERT_FILE", _certifi.where())
+_os.environ.setdefault("REQUESTS_CA_BUNDLE", _certifi.where())
+
 from pathlib import Path
 from pydantic_settings import BaseSettings
 from pydantic import model_validator
