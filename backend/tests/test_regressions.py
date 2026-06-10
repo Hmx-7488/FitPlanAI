@@ -57,19 +57,25 @@ class ResponseNormalizationTests(unittest.TestCase):
         result = _normalize_pose_result(
             {
                 "score": 140,
-                "issues": [{"severity": "unknown", "description": "x", "suggestion": "y"}],
+                "issues": [{"severity": "unknown", "title": "问题", "description": "x", "impact": "y", "correction": "z"}],
                 "coach_cues": "bad format",
                 "phases": [{"phase": "下降", "observation": "膝盖内扣"}],
                 "rep_count_estimate": 3,
+                "risk_level": "invalid",
+                "metrics": [{"name": "稳定", "score": 200, "description": "test"}],
             },
             "深蹲",
             True,
         )
 
+        self.assertEqual(result["overall_score"], 100)
         self.assertEqual(result["score"], 100)
+        self.assertEqual(result["risk_level"], "low")
         self.assertEqual(result["issues"][0]["severity"], "low")
+        self.assertEqual(result["issues"][0]["title"], "问题")
         self.assertEqual(result["coach_cues"], ["核心收紧", "动作匀速"])
         self.assertEqual(result["rep_count_estimate"], 3)
+        self.assertEqual(result["metrics"][0]["score"], 100)
 
     def test_body_fat_range_is_ordered_and_bounded(self):
         user = type("User", (), {"gender": "female"})()

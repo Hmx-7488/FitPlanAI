@@ -31,28 +31,58 @@ MOVEMENT_NAMES = {
     "plank": "平板支撑",
 }
 
-# Mock 降级模板
+# Mock 降级模板（匹配新结构）
 MOCK_FALLBACK = {
-    "squat": {"name": "深蹲", "score": 82, "issues": [
-        {"type": "knee_tracking", "severity": "medium", "description": "下蹲时膝盖有轻微内扣趋势。", "suggestion": "下蹲时膝盖方向与脚尖一致，可使用弹力带辅助激活臀中肌。"},
-        {"type": "depth", "severity": "low", "description": "下蹲幅度略不足，大腿未到平行地面。", "suggestion": "适当降低重心，确保髋关节低于膝关节。"},
-    ], "coach_cues": ["核心收紧", "膝盖跟脚尖方向一致", "臀部向后坐", "背部保持平直"]},
-    "deadlift": {"name": "硬拉", "score": 78, "issues": [
-        {"type": "back_rounding", "severity": "medium", "description": "起始阶段腰椎有轻微弯曲。", "suggestion": "启动前收紧核心，肩胛后收下沉，保持脊柱中立。"},
-    ], "coach_cues": ["杠铃贴身上行", "髋主导发力", "肩胛收紧", "全程脊柱中立"]},
-    "bench_press": {"name": "卧推", "score": 85, "issues": [
-        {"type": "shoulder_position", "severity": "low", "description": "推起时肩胛有轻微松动。", "suggestion": "全程保持肩胛后收下沉，脚踩实地面。"},
-    ], "coach_cues": ["肩胛后收下沉", "双脚踩实", "杠铃下放至胸口中部", "全程控制节奏"]},
-    "pull_up": {"name": "引体向上", "score": 80, "issues": [
-        {"type": "range_of_motion", "severity": "medium", "description": "下放阶段手肘未完全伸展，动作幅度略不足。", "suggestion": "下放时保持控制，手臂接近伸直后再开始下一次。"},
-    ], "coach_cues": ["核心收紧", "肩胛先下沉再拉", "避免身体大幅摆动"]},
-    "push_up": {"name": "俯卧撑", "score": 88, "issues": [
-        {"type": "hip_sag", "severity": "low", "description": "后半程有轻微塌腰趋势。", "suggestion": "收紧腹部和臀部，保持身体一条直线。"},
-    ], "coach_cues": ["身体一条直线", "手肘不完全锁死", "匀速上下"]},
+    "squat": {"movement_name": "深蹲", "overall_score": 82, "risk_level": "low", "confidence": 0.6,
+              "summary": "深蹲整体技术良好，膝盖追踪和下蹲深度可进一步优化。",
+              "metrics": [
+                  {"name": "关节轨迹", "score": 70, "description": "膝盖有轻微内扣趋势"},
+                  {"name": "躯干稳定", "score": 85, "description": "脊柱保持中立"},
+                  {"name": "动作幅度", "score": 75, "description": "下蹲深度略不足"},
+                  {"name": "节奏控制", "score": 80, "description": "下降上升速度均匀"},
+              ],
+              "issues": [
+                  {"title": "膝盖内扣", "severity": "medium", "description": "下蹲时膝盖有轻微内扣趋势。", "timestamp": None, "impact": "长期增加膝关节压力", "correction": "下蹲时膝盖方向与脚尖一致，可使用弹力带辅助激活臀中肌。"},
+                  {"title": "下蹲深度不足", "severity": "low", "description": "下蹲幅度略不足，大腿未到平行地面。", "timestamp": None, "impact": "肌肉激活范围受限", "correction": "适当降低重心，确保髋关节低于膝关节。"},
+              ],
+              "corrections": [{"area": "膝盖追踪", "technique": "下蹲时膝盖对准第二脚趾方向", "drills": ["弹力带深蹲", "箱式深蹲"], "sets_reps": "3组x12次", "next_filming_tip": "侧面拍摄，关注膝盖轨迹"}],
+              "good_points": ["背部保持平直", "核心稳定"],
+              "coach_cues": ["核心收紧", "膝盖跟脚尖方向一致", "臀部向后坐", "背部保持平直"]},
+    "deadlift": {"movement_name": "硬拉", "overall_score": 78, "risk_level": "medium", "confidence": 0.6,
+                 "summary": "硬拉起始阶段腰椎有轻微弯曲，需要加强核心收紧。",
+                 "metrics": [{"name": "脊柱中立", "score": 65, "description": "起始阶段腰椎有轻微弯曲"}, {"name": "髋主导", "score": 80, "description": "发力模式基本正确"}],
+                 "issues": [{"title": "腰椎弯曲", "severity": "medium", "description": "起始阶段腰椎有轻微弯曲。", "timestamp": None, "impact": "腰椎间盘压力增大", "correction": "启动前收紧核心，肩胛后收下沉，保持脊柱中立。"}],
+                 "corrections": [{"area": "脊柱中立", "technique": "启动前先绷紧核心，想象胸口向上提", "drills": ["罗马尼亚硬拉", "反向划船"], "sets_reps": "3组x10次", "next_filming_tip": "侧面拍摄，关注腰椎曲线"}],
+                 "good_points": ["杠铃路径贴身", "髋主导发力"],
+                 "coach_cues": ["杠铃贴身上行", "髋主导发力", "肩胛收紧", "全程脊柱中立"]},
+    "bench_press": {"movement_name": "卧推", "overall_score": 85, "risk_level": "low", "confidence": 0.6,
+                    "summary": "卧推整体技术较好，肩胛稳定性可进一步优化。",
+                    "metrics": [{"name": "肩胛稳定", "score": 75, "description": "推起时肩胛有轻微松动"}, {"name": "杠铃路径", "score": 85, "description": "杠铃轨迹基本合理"}],
+                    "issues": [{"title": "肩胛松动", "severity": "low", "description": "推起时肩胛有轻微松动。", "timestamp": None, "impact": "肩关节稳定性下降", "correction": "全程保持肩胛后收下沉，脚踩实地面。"}],
+                    "corrections": [{"area": "肩胛控制", "technique": "全程保持肩胛后收下沉", "drills": ["地板卧推", "暂停卧推"], "sets_reps": "3组x8次", "next_filming_tip": "侧面拍摄，关注肩胛位置"}],
+                    "good_points": ["双脚踩实", "杠铃下放位置合理"],
+                    "coach_cues": ["肩胛后收下沉", "双脚踩实", "杠铃下放至胸口中部", "全程控制节奏"]},
+    "pull_up": {"movement_name": "引体向上", "overall_score": 80, "risk_level": "low", "confidence": 0.6,
+                "summary": "引体向上动作幅度略不足，下放阶段手肘未完全伸展。",
+                "metrics": [{"name": "动作幅度", "score": 70, "description": "下放阶段手肘未完全伸展"}, {"name": "身体控制", "score": 85, "description": "摆动幅度较小"}],
+                "issues": [{"title": "幅度不足", "severity": "medium", "description": "下放阶段手肘未完全伸展，动作幅度略不足。", "timestamp": None, "impact": "背阔肌激活不充分", "correction": "下放时保持控制，手臂接近伸直后再开始下一次。"}],
+                "corrections": [{"area": "动作幅度", "technique": "下放时手臂完全伸展再发力", "drills": ["离心引体", "弹力带辅助引体"], "sets_reps": "3组x6次", "next_filming_tip": "侧面拍摄，关注手臂伸展"}],
+                "good_points": ["核心收紧", "肩胛先下沉再拉"],
+                "coach_cues": ["核心收紧", "肩胛先下沉再拉", "避免身体大幅摆动"]},
+    "push_up": {"movement_name": "俯卧撑", "overall_score": 88, "risk_level": "low", "confidence": 0.6,
+                "summary": "俯卧撑整体技术良好，后半程有轻微塌腰趋势。",
+                "metrics": [{"name": "躯干稳定", "score": 80, "description": "后半程有轻微塌腰趋势"}, {"name": "动作节奏", "score": 90, "description": "上下速度均匀"}],
+                "issues": [{"title": "轻微塌腰", "severity": "low", "description": "后半程有轻微塌腰趋势。", "timestamp": None, "impact": "腰椎代偿", "correction": "收紧腹部和臀部，保持身体一条直线。"}],
+                "corrections": [{"area": "核心控制", "technique": "全程收紧腹部和臀部", "drills": ["平板支撑", "死虫式"], "sets_reps": "3组x30秒", "next_filming_tip": "侧面拍摄，关注腰椎位置"}],
+                "good_points": ["身体一条直线", "手肘不完全锁死"],
+                "coach_cues": ["身体一条直线", "手肘不完全锁死", "匀速上下"]},
 }
-DEFAULT_MOCK = {"name": "自定义动作", "score": 75, "issues": [
-    {"type": "general", "severity": "low", "description": "整体动作完成度尚可，建议注意动作节奏和呼吸配合。", "suggestion": "保持匀速，发力时呼气，还原时吸气。"},
-], "coach_cues": ["核心收紧", "动作匀速", "呼吸配合"]}
+DEFAULT_MOCK = {"movement_name": "自定义动作", "overall_score": 75, "risk_level": "low", "confidence": 0.5,
+                "summary": "整体动作完成度尚可，建议注意动作节奏和呼吸配合。",
+                "metrics": [],
+                "issues": [{"title": "整体评估", "severity": "low", "description": "整体动作完成度尚可，建议注意动作节奏和呼吸配合。", "timestamp": None, "impact": "动作效率", "correction": "保持匀速，发力时呼气，还原时吸气。"}],
+                "corrections": [], "good_points": [],
+                "coach_cues": ["核心收紧", "动作匀速", "呼吸配合"]}
 
 
 def _extract_json_object(raw: str) -> dict:
@@ -72,30 +102,92 @@ def _extract_json_object(raw: str) -> dict:
     return data
 
 
-def _normalize_pose_result(parsed: dict, movement_cn: str, is_video: bool) -> dict:
-    score = parsed.get("score", 75)
+def _clamp_int(value, lo: int = 0, hi: int = 100, default: int = 75) -> int:
     try:
-        score = int(round(float(score)))
+        return max(lo, min(hi, int(round(float(value)))))
     except (TypeError, ValueError):
-        score = 75
-    score = max(0, min(score, 100))
+        return default
 
+
+def _normalize_pose_result(parsed: dict, movement_cn: str, is_video: bool) -> dict:
+    overall_score = _clamp_int(parsed.get("overall_score", parsed.get("score", 75)))
+
+    risk_level = parsed.get("risk_level", "low")
+    if risk_level not in {"high", "medium", "low"}:
+        risk_level = "low"
+
+    summary = str(parsed.get("summary", ""))[:300]
+    confidence = parsed.get("confidence")
+    if confidence is not None:
+        try:
+            confidence = max(0.0, min(1.0, float(confidence)))
+        except (TypeError, ValueError):
+            confidence = None
+
+    # metrics
+    metrics = parsed.get("metrics", [])
+    if not isinstance(metrics, list):
+        metrics = []
+    normalized_metrics = []
+    for m in metrics[:8]:
+        if not isinstance(m, dict):
+            continue
+        normalized_metrics.append({
+            "name": str(m.get("name", ""))[:40],
+            "score": _clamp_int(m.get("score", 0)),
+            "description": str(m.get("description", ""))[:160],
+        })
+
+    # issues（增强结构）
     issues = parsed.get("issues", [])
     if not isinstance(issues, list):
         issues = []
     normalized_issues = []
-    for item in issues[:6]:
+    for item in issues[:8]:
         if not isinstance(item, dict):
             continue
         severity = item.get("severity", "low")
         if severity not in {"high", "medium", "low"}:
             severity = "low"
+        timestamp = item.get("timestamp")
+        if timestamp is not None:
+            try:
+                timestamp = round(float(timestamp), 1)
+            except (TypeError, ValueError):
+                timestamp = None
         normalized_issues.append({
-            "type": str(item.get("type", "general")),
+            "title": str(item.get("title", item.get("type", "问题")))[:60],
             "severity": severity,
-            "description": str(item.get("description", ""))[:160],
-            "suggestion": str(item.get("suggestion", ""))[:180],
+            "description": str(item.get("description", ""))[:200],
+            "timestamp": timestamp,
+            "impact": str(item.get("impact", ""))[:160],
+            "correction": str(item.get("correction", item.get("suggestion", "")))[:200],
         })
+
+    # corrections
+    corrections = parsed.get("corrections", [])
+    if not isinstance(corrections, list):
+        corrections = []
+    normalized_corrections = []
+    for c in corrections[:6]:
+        if not isinstance(c, dict):
+            continue
+        drills = c.get("drills", [])
+        if not isinstance(drills, list):
+            drills = []
+        normalized_corrections.append({
+            "area": str(c.get("area", ""))[:40],
+            "technique": str(c.get("technique", ""))[:200],
+            "drills": [str(d)[:60] for d in drills[:4] if d],
+            "sets_reps": str(c.get("sets_reps", ""))[:60],
+            "next_filming_tip": str(c.get("next_filming_tip", ""))[:120],
+        })
+
+    # good_points
+    good_points = parsed.get("good_points", [])
+    if not isinstance(good_points, list):
+        good_points = []
+    good_points = [str(g)[:100] for g in good_points[:6] if g]
 
     coach_cues = parsed.get("coach_cues", ["核心收紧", "动作匀速"])
     if not isinstance(coach_cues, list):
@@ -115,8 +207,15 @@ def _normalize_pose_result(parsed: dict, movement_cn: str, is_video: bool) -> di
 
     return {
         "movement_name": parsed.get("movement_name", movement_cn),
-        "score": score,
+        "overall_score": overall_score,
+        "score": overall_score,
+        "risk_level": risk_level,
+        "summary": summary,
+        "confidence": confidence,
+        "metrics": normalized_metrics,
         "issues": normalized_issues,
+        "corrections": normalized_corrections,
+        "good_points": good_points,
         "coach_cues": [str(cue) for cue in coach_cues[:6]],
         "phases": normalized_phases,
         "rep_count_estimate": parsed.get("rep_count_estimate") if is_video else None,
@@ -154,9 +253,17 @@ async def _analyze_pose_frames(
     injury_ctx = f"用户伤病史：{'、'.join(injuries)}。请把相关关节风险纳入建议。" if injuries else "用户未填写明确伤病史。"
     media_desc = "按时间顺序排列的训练动作视频关键帧" if is_video else "训练动作照片"
     output_example = (
-        '{"score":82,"movement_name":"深蹲","rep_count_estimate":1,'
+        '{"overall_score":82,"movement_name":"深蹲","risk_level":"medium","confidence":0.8,'
+        '"summary":"深蹲整体技术中等，膝盖内扣是主要风险点。",'
+        '"rep_count_estimate":1,'
+        '"metrics":[{"name":"关节轨迹","score":70,"description":"膝盖有轻微内扣"},'
+        '{"name":"躯干稳定","score":85,"description":"脊柱保持中立"},'
+        '{"name":"动作幅度","score":75,"description":"下蹲深度略不足"},'
+        '{"name":"节奏控制","score":80,"description":"下降和上升速度均匀"}],'
+        '"issues":[{"title":"膝盖内扣","severity":"medium","description":"下蹲阶段膝盖略向内扣","timestamp":2.3,"impact":"长期可能增加膝关节压力","correction":"下蹲时主动让膝盖跟随第二脚趾方向"}],'
+        '"corrections":[{"area":"膝盖追踪","technique":"下蹲时膝盖对准第二脚趾","drills":["弹力带深蹲","箱式深蹲"],"sets_reps":"3组x12次","next_filming_tip":"侧面拍摄，关注膝盖轨迹"}],'
+        '"good_points":["背部保持平直","核心稳定"],'
         '"phases":[{"phase":"起始","observation":"站距与脚尖方向基本稳定"}],'
-        '"issues":[{"type":"knee_tracking","severity":"medium","description":"下蹲阶段膝盖略向内扣","suggestion":"下蹲时主动让膝盖跟随第二脚趾方向"}],'
         '"coach_cues":["核心收紧","膝盖跟脚尖","控制离心","保持脊柱中立"]}'
     )
     prompt = (
@@ -164,11 +271,17 @@ async def _analyze_pose_frames(
         "请只基于可见画面分析，不要编造看不到的角度；如果画面不完整，要降低置信并说明。\n"
         "评估维度：关节轨迹、躯干/脊柱稳定、动作幅度、节奏控制、左右对称、潜在伤病风险。\n"
         "输出严格 JSON，不要 markdown，不要额外文字。字段：\n"
-        "- score: 0-100 整数，70以下表示有明显技术风险\n"
+        "- overall_score: 0-100 整数，70以下表示有明显技术风险\n"
         "- movement_name: 中文动作名\n"
+        "- risk_level: low/medium/high\n"
+        "- confidence: 0-1 置信度\n"
+        "- summary: 50字以内整体评价\n"
         "- rep_count_estimate: 视频中可见的重复次数，单张照片填 null\n"
+        "- metrics: 数组，每项含 name(维度名), score(0-100), description\n"
+        "- issues: 数组，每项含 title, severity(high|medium|low), description, timestamp(视频秒数或null), impact, correction\n"
+        "- corrections: 数组，每项含 area, technique, drills(数组), sets_reps, next_filming_tip\n"
+        "- good_points: 数组，做得好的方面\n"
         "- phases: 数组，按起始/下降或离心/底部/上升或向心/结束给出观察\n"
-        "- issues: 数组，每项含 type, severity(high|medium|low), description, suggestion\n"
         "- coach_cues: 3-6条短口令\n"
         f"示例：{output_example}"
     )
@@ -189,7 +302,17 @@ async def _analyze_pose_frames(
         raw = response.content.strip()
         logger.info("Vision Model raw pose %s response: %s", "video" if is_video else "image", raw)
         parsed = _extract_json_object(raw)
-        return _normalize_pose_result(parsed, movement_cn, is_video)
+        result = _normalize_pose_result(parsed, movement_cn, is_video)
+
+        # 质量校验：分数为 0 且无有效内容时视为模型失败，降级到 mock
+        has_metrics = bool(result.get("metrics"))
+        has_issues = bool(result.get("issues"))
+        logger.info("Pose quality check: score=%s metrics=%s issues=%s", result["overall_score"], has_metrics, has_issues)
+        if result["overall_score"] == 0 and not has_metrics and not has_issues:
+            logger.warning("Vision Model returned empty/invalid pose analysis; falling back to mock.")
+            return None
+
+        return result
     except Exception:
         logger.exception("Vision Model pose analysis failed; falling back to template. movement=%s video=%s", movement_key, is_video)
         return None
@@ -235,11 +358,19 @@ async def analyze_pose(
         "analysis_id": f"pose_{uuid.uuid4().hex[:8]}",
         "photo_url": f"/uploads/pose/{saved_name}",
         "movement_name": result["movement_name"],
-        "score": result["score"],
+        "overall_score": result["overall_score"],
+        "score": result["overall_score"],
+        "risk_level": result.get("risk_level", "low"),
+        "summary": result.get("summary", ""),
+        "confidence": result.get("confidence"),
+        "metrics": result.get("metrics", []),
         "issues": result["issues"],
+        "corrections": result.get("corrections", []),
+        "good_points": result.get("good_points", []),
         "coach_cues": result["coach_cues"],
         "phases": result.get("phases", []),
         "rep_count_estimate": result.get("rep_count_estimate"),
+        "analyzed_frames": 1,
         "risk_warnings": risk_warnings,
         "is_ai_analysis": result.get("is_ai", False),
         "media_type": "image",
@@ -305,11 +436,19 @@ async def analyze_pose_video(
         "video_url": f"/uploads/pose/{video_name}",
         "frame_urls": frame_urls,
         "movement_name": result["movement_name"],
-        "score": result["score"],
+        "overall_score": result["overall_score"],
+        "score": result["overall_score"],
+        "risk_level": result.get("risk_level", "low"),
+        "summary": result.get("summary", ""),
+        "confidence": result.get("confidence"),
+        "metrics": result.get("metrics", []),
         "issues": result["issues"],
+        "corrections": result.get("corrections", []),
+        "good_points": result.get("good_points", []),
         "coach_cues": result["coach_cues"],
         "phases": result.get("phases", []),
         "rep_count_estimate": result.get("rep_count_estimate"),
+        "analyzed_frames": len(frame_payloads),
         "risk_warnings": risk_warnings,
         "is_ai_analysis": result.get("is_ai", False),
         "media_type": "video",
