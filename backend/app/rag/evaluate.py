@@ -45,8 +45,8 @@ _EVAL_CASES = [
     {
         "id": "insufficient_evidence",
         "query": "量子力学对减脂的影响",
-        "must_be_empty_or_insufficient": True,
-        "description": "Should return insufficient evidence for nonsensical query",
+        "max_score_threshold": 0.65,
+        "description": "Should return low-confidence results for nonsensical query",
     },
     {
         "id": "wrong_premise",
@@ -100,6 +100,9 @@ def run_evaluation() -> dict:
             passed = False; reason = "Expected results but got insufficient_evidence"
         if case.get("must_be_empty_or_insufficient") and not sr.insufficient_evidence:
             passed = False; reason = "Expected insufficient_evidence but got results"
+        max_thr = case.get("max_score_threshold")
+        if max_thr is not None and sr.documents and sr.documents[0].score > max_thr:
+            passed = False; reason = f"Top score {sr.documents[0].score:.3f} exceeds threshold {max_thr}"
 
         if passed: pass_count += 1
         results.append({

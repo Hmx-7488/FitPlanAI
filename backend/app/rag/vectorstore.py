@@ -34,6 +34,8 @@ class VectorStoreManager:
             model="text-embedding-v3",
             openai_api_key=s.LLM_API_KEY,
             openai_api_base=s.LLM_BASE_URL,
+            check_embedding_ctx_length=False,  # DashScope 不接受 token IDs，需要直接传文本
+            chunk_size=10,  # DashScope embedding API 限制 batch size ≤ 10
         )
 
     def get_store(self) -> Chroma:
@@ -100,15 +102,32 @@ class VectorStoreManager:
             if count < 1:
                 raise ValueError(f"New vectorstore has {count} documents, expected >= 1")
 
-            # Swap: rename old -> backup, tmp -> current
+            # Close both stores to release file locks (required on Windows)
+            try:
+                new_store._client.close()
+            except Exception:
+                pass
+            if self._store is not None:
+                try:
+                    self._store._client.close()
+                except Exception:
+                    pass
+                self._store = None
+
+            # Swap: old -> backup, tmp -> current
             backup_dir = _BASE_DIR / "vectorstore_backup"
             if _VECTORSTORE_DIR.exists():
                 if backup_dir.exists():
                     shutil.rmtree(backup_dir)
-                _VECTORSTORE_DIR.rename(backup_dir)
-            tmp_dir.rename(_VECTORSTORE_DIR)
+                shutil.move(str(_VECTORSTORE_DIR), str(backup_dir))
+            shutil.move(str(tmp_dir), str(_VECTORSTORE_DIR))
 
-            self._store = new_store
+            # Reopen store from new location
+            self._store = Chroma(
+                embedding_function=embeddings,
+                persist_directory=str(_VECTORSTORE_DIR),
+                collection_name="slim_agent_knowledge",
+            )
             self._index_version = f"v_{int(time.time())}"
             self._last_rebuild = time.time()
 
@@ -126,7 +145,7 @@ class VectorStoreManager:
             # Try to restore backup
             backup_dir = _BASE_DIR / "vectorstore_backup"
             if backup_dir.exists() and not _VECTORSTORE_DIR.exists():
-                backup_dir.rename(_VECTORSTORE_DIR)
+                shutil.move(str(backup_dir), str(_VECTORSTORE_DIR))
             raise
 
         # Build stats
