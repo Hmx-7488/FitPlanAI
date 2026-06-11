@@ -198,6 +198,7 @@ class RetrievedChunk(BaseModel):
     document_id: str
     title: str
     content: str
+    category: str = ""
     source_name: str = ""
     source_url: str = ""
     evidence_level: str = ""

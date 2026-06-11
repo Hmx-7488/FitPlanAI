@@ -25,6 +25,7 @@ class AgentState(TypedDict):
     exercise_knowledge: str
     diet_knowledge: str
     risk_knowledge: str            # 风险规则知识
+    knowledge_citations: list[dict]  # RAG 引用来源
     meal_plan: str
     workout_plan: str
     risk_warnings: list[str]       # 风险校验结果
@@ -202,11 +203,29 @@ def retrieve_knowledge_node(state: AgentState) -> dict:
     risk_result = retriever.search(risk_sq)
     risk_knowledge = "\n".join(d.content for d in risk_result.documents)
 
+    # 收集引用来源（去重）
+    seen_ids = set()
+    citations = []
+    for result in [food_result, exercise_result, diet_result, risk_result]:
+        for d in result.documents:
+            if d.chunk_id not in seen_ids:
+                seen_ids.add(d.chunk_id)
+                citations.append({
+                    "chunk_id": d.chunk_id,
+                    "title": d.title,
+                    "category": d.category,
+                    "source_name": d.source_name,
+                    "source_url": d.source_url,
+                    "evidence_level": d.evidence_level,
+                    "score": d.score,
+                })
+
     return {
         "food_knowledge": food_knowledge[:600],
         "exercise_knowledge": exercise_knowledge[:600],
         "diet_knowledge": diet_knowledge[:400],
         "risk_knowledge": risk_knowledge[:600],
+        "knowledge_citations": citations,
     }
 
 
@@ -589,6 +608,7 @@ async def run_workflow(user_profile: dict) -> dict:
         "exercise_knowledge": "",
         "diet_knowledge": "",
         "risk_knowledge": "",
+        "knowledge_citations": [],
         "meal_plan": "",
         "workout_plan": "",
         "risk_warnings": [],
@@ -614,6 +634,8 @@ async def run_workflow(user_profile: dict) -> dict:
         "meal_plan": result["meal_plan"],
         "workout_plan": result["workout_plan"],
         "summary": result["summary"],
+        "knowledge_citations": result.get("knowledge_citations", []),
+        "risk_warnings": result.get("risk_warnings", []),
     }
 
 

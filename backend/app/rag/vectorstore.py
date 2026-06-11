@@ -89,6 +89,7 @@ class VectorStoreManager:
             shutil.rmtree(tmp_dir)
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
+        backup_dir = _BASE_DIR / "vectorstore_backup"
         try:
             new_store = Chroma.from_documents(
                 documents=docs,
@@ -115,7 +116,6 @@ class VectorStoreManager:
                 self._store = None
 
             # Swap: old -> backup, tmp -> current
-            backup_dir = _BASE_DIR / "vectorstore_backup"
             if _VECTORSTORE_DIR.exists():
                 if backup_dir.exists():
                     shutil.rmtree(backup_dir)
@@ -138,14 +138,18 @@ class VectorStoreManager:
             logger.info("Vectorstore built: %d chunks in %.0fms", count, (time.time()-t0)*1000)
 
         except Exception as e:
-            # Rollback: restore old store if available
             logger.error("Vectorstore build failed: %s", e)
+            self._store = None
+            # 清理可能存在的损坏新目录
+            if _VECTORSTORE_DIR.exists():
+                shutil.rmtree(_VECTORSTORE_DIR, ignore_errors=True)
+            # 清理 tmp
             if tmp_dir.exists():
                 shutil.rmtree(tmp_dir, ignore_errors=True)
-            # Try to restore backup
-            backup_dir = _BASE_DIR / "vectorstore_backup"
-            if backup_dir.exists() and not _VECTORSTORE_DIR.exists():
+            # 从备份恢复
+            if backup_dir.exists():
                 shutil.move(str(backup_dir), str(_VECTORSTORE_DIR))
+                logger.info("Vectorstore restored from backup")
             raise
 
         # Build stats

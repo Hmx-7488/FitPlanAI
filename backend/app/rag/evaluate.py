@@ -87,30 +87,49 @@ def run_evaluation() -> dict:
             top_k=5,
         )
         sr = retriever.search(sq)
-        hit_cats = set()
-        hit_chunk_ids = []
-        for d in sr.documents:
-            # infer category from evidence_level field in RetrievedChunk
-            hit_chunk_ids.append(d.chunk_id)
+
+        # 收集命中的分类
+        hit_cats = {d.category for d in sr.documents if d.category}
+        hit_chunk_ids = [d.chunk_id for d in sr.documents]
 
         passed = True
         reason = ""
 
+        # 1. 非空检查
         if case.get("must_not_be_empty") and sr.insufficient_evidence:
-            passed = False; reason = "Expected results but got insufficient_evidence"
+            passed = False
+            reason = "Expected results but got insufficient_evidence"
+
+        # 2. 证据不足检查
         if case.get("must_be_empty_or_insufficient") and not sr.insufficient_evidence:
-            passed = False; reason = "Expected insufficient_evidence but got results"
+            passed = False
+            reason = "Expected insufficient_evidence but got results"
+
+        # 3. 分数阈值检查
         max_thr = case.get("max_score_threshold")
         if max_thr is not None and sr.documents and sr.documents[0].score > max_thr:
-            passed = False; reason = f"Top score {sr.documents[0].score:.3f} exceeds threshold {max_thr}"
+            passed = False
+            reason = f"Top score {sr.documents[0].score:.3f} exceeds threshold {max_thr}"
 
-        if passed: pass_count += 1
+        # 4. 期望分类校验 — 至少命中一个期望分类
+        expected = case.get("expected_categories", [])
+        if expected and passed:
+            if not hit_cats.intersection(expected):
+                passed = False
+                reason = f"Expected categories {expected} but got {hit_cats}"
+
+        if passed:
+            pass_count += 1
         results.append({
             "id": case["id"],
             "query": case["query"],
             "passed": passed,
             "reason": reason,
-            "top_results": [{"title": d.title[:50], "score": d.score, "method": d.retrieval_method} for d in sr.documents[:3]],
+            "top_results": [
+                {"title": d.title[:50], "score": d.score, "method": d.retrieval_method, "category": d.category}
+                for d in sr.documents[:3]
+            ],
+            "hit_categories": sorted(hit_cats),
             "insufficient_evidence": sr.insufficient_evidence,
             "hit_chunk_ids": hit_chunk_ids,
         })
