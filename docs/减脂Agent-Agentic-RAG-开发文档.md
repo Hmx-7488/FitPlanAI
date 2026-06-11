@@ -1695,22 +1695,24 @@ DashScope embedding API 兼容处理：
 
 ```text
 SearchQuery
-→ 构建元数据过滤器（categories）
-→ 向量召回（2×top_k）
-→ 关键词召回（2×top_k，分数 /10 归一化）
+→ 构建 Chroma 元数据过滤器（categories）
+→ 向量召回（2×top_k，Chroma 过滤）
+→ 关键词召回（2×top_k，分数 /10 归一化，按 categories 过滤）
 → 按 chunk_id 合并去重（取较高分，标记 vector/keyword/hybrid）
-→ 多维重排序：
+→ 重排序 + 硬过滤：
+    硬排除：伤病禁忌命中 contraindications 的知识块直接移除
     +0.10  goal_type 匹配
     +0.02  general 通用匹配
-    -0.30  伤病禁忌惩罚
     +0.05  guideline 证据等级
     +0.03  research 证据等级
     +0.01  expert 证据等级
     +0.08  category 匹配
 → 截断 top_k
 → insufficient_evidence 检测（阈值 0.15）
-→ 返回 SearchResult
+→ 返回 SearchResult（含 category 字段）
 ```
+
+伤病禁忌处理：命中 contraindications 的知识块从结果中直接排除（硬过滤），而非仅扣分。
 
 返回结构：
 
@@ -1722,6 +1724,7 @@ SearchQuery
       “chunk_id”: “chk_xxx”,
       “title”: “热量缺口范围”,
       “content”: “安全热量缺口 300-500 kcal...”,
+      “category”: “fat_loss_standards”,
       “source_name”: “ACSM Guidelines”,
       “evidence_level”: “guideline”,
       “score”: 0.908,
@@ -1780,15 +1783,19 @@ risk_sq = SearchQuery(
 
 3. 向后兼容：`retrieve_knowledge(query, k)` 旧接口内部调用 HybridRetriever，`vision_service.py` 和 `calorie_tools.py` 无需修改。
 
+4. 引用返回：`retrieve_knowledge_node` 收集去重后的引用来源（chunk_id、title、category、source_name、source_url、evidence_level、score），通过 `AgentState.knowledge_citations` 传递，最终在 `run_workflow` 响应中返回。
+
 ### 18.8 知识管理 API
 
-| 端点 | 方法 | 说明 |
-| --- | --- | --- |
-| `/api/knowledge/rebuild` | POST | 重建向量+关键词索引 |
-| `/api/knowledge/search` | POST | 混合检索，支持 SearchQuery 全字段 |
-| `/api/knowledge/status` | GET | 索引状态（文档数、知识块数、分类统计） |
-| `/api/knowledge/documents` | GET | 列出所有知识文档元数据 |
-| `/api/knowledge/evaluate` | POST | 运行评估套件 |
+| 端点 | 方法 | 鉴权 | 说明 |
+| --- | --- | --- | --- |
+| `/api/knowledge/search` | POST | 公开 | 混合检索，支持 SearchQuery 全字段 |
+| `/api/knowledge/status` | GET | 公开 | 索引状态（文档数、知识块数、分类统计） |
+| `/api/knowledge/rebuild` | POST | 需 X-Admin-Key | 重建向量+关键词索引 |
+| `/api/knowledge/documents` | GET | 需 X-Admin-Key | 列出所有知识文档元数据 |
+| `/api/knowledge/evaluate` | POST | 需 X-Admin-Key | 运行评估套件 |
+
+鉴权说明：管理接口需在请求头携带 `X-Admin-Key`，值与配置项 `KNOWLEDGE_ADMIN_KEY` 匹配。未配置时（开发环境）放行。
 
 ### 18.9 评估集
 
@@ -1807,7 +1814,13 @@ risk_sq = SearchQuery(
 | protein_intake | 减脂期每公斤体重需要多少蛋白质 | 命中 fat_loss_standards |
 | back_injury_deadlift | 腰椎间盘突出能做硬拉吗 | 命中 risk_rules + exercise_technique |
 
-当前评估结果：10/10 通过，全部为 hybrid 或 keyword 检索命中。
+评估校验项：
+- `must_not_be_empty`：结果非空且 insufficient_evidence=false
+- `max_score_threshold`：Top-1 分数不超过阈值
+- `expected_categories`：至少命中一个期望分类（基于 RetrievedChunk.category 实际校验）
+- `must_be_empty_or_insufficient`：结果为空或 insufficient_evidence=true
+
+当前评估结果：10/10 通过，全部为 hybrid 或 keyword 检索命中，分类校验通过。
 
 ### 18.10 测试覆盖
 
@@ -1857,11 +1870,16 @@ backend/tests/
 
 - [x] 每个知识块都有来源、证据等级、适用条件和版本。
 - [x] 检索支持语义、关键词和元数据过滤。
+- [x] 关键词结果也按 categories 过滤。
+- [x] 伤病禁忌硬过滤：命中 contraindications 直接排除。
 - [x] 工作流节点使用 SearchQuery 精准检索（按目标/伤病/类别）。
 - [x] 无可靠依据时返回 insufficient_evidence。
+- [x] 评估集实际校验 expected_categories（基于 RetrievedChunk.category）。
 - [x] 固定评估集可以自动运行并输出结果（10/10 通过）。
 - [x] 向后兼容旧 retrieve_knowledge 接口。
-- [x] 安全重建模式支持回滚。
+- [x] 安全重建回滚：reopen 失败时删除损坏目录并从 backup 恢复。
+- [x] 管理接口鉴权：rebuild/documents/evaluate 需 X-Admin-Key。
+- [x] 业务结果返回引用（knowledge_citations）。
 - [x] DashScope embedding API 兼容。
 - [x] Windows 文件锁兼容。
 
