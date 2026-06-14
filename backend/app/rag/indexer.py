@@ -12,6 +12,8 @@ from app.rag.models import (
 logger = logging.getLogger(__name__)
 _FM_RE = re.compile(r'^---\s*\n(.*?)\n---\s*\n', re.DOTALL)
 _HD_RE = re.compile(r'^(#{1,3})\s+(.+)$', re.MULTILINE)
+# 章节级元数据注释：<!-- key: value -->
+_META_COMMENT_RE = re.compile(r'<!--\s*(\w+)\s*:\s*(.+?)\s*-->')
 
 
 def parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -78,12 +80,40 @@ def _build_doc(meta: dict, body: str) -> Optional[KnowledgeDocument]:
         return None
 
 
+def _parse_chapter_meta(text_before_heading: str) -> dict:
+    """从标题前的 HTML 注释中解析章节级元数据。
+
+    支持格式：
+        <!-- knowledge_role: recommendation -->
+        <!-- contraindications: [knee_injury] -->
+        <!-- training_level: beginner -->
+    """
+    result = {}
+    for m in _META_COMMENT_RE.finditer(text_before_heading):
+        key, val = m.group(1).strip(), m.group(2).strip()
+        # 解析列表值 [a, b, c]
+        if val.startswith("[") and val.endswith("]"):
+            inner = val[1:-1].strip()
+            result[key] = [v.strip() for v in inner.split(",") if v.strip()] if inner else []
+        else:
+            result[key] = val
+    return result
+
+
 def _split(body: str, doc: KnowledgeDocument, meta: dict) -> list[KnowledgeChunk]:
     chunks = []
     tags = _norm_list(meta.get("tags", []))
     gt_strs = _norm_list(meta.get("goal_types", []))
     conds = _norm_list(meta.get("applicable_conditions", []))
     contra = _norm_list(meta.get("contraindications", []))
+    risk_tags = _norm_list(meta.get("risk_tags", []))
+    safe_alts = _norm_list(meta.get("safe_alternatives", []))
+    training_level = str(meta.get("training_level", "general")).strip().lower()
+    if training_level not in ("general", "beginner", "intermediate", "advanced"):
+        training_level = "general"
+    knowledge_role = str(meta.get("knowledge_role", "general")).strip().lower()
+    if knowledge_role not in ("recommendation", "correction", "risk_warning", "alternative", "general"):
+        knowledge_role = "general"
     gts = []
     for g in gt_strs:
         try:
@@ -99,14 +129,19 @@ def _split(body: str, doc: KnowledgeDocument, meta: dict) -> list[KnowledgeChunk
             chunks.append(KnowledgeChunk(
                 document_id=doc.document_id, title=doc.title,
                 content=c[:3000], topic=tags[0] if tags else "",
-                goal_types=gts, applicable_conditions=conds,
-                contraindications=contra, tags=tags,
+                goal_types=gts, training_level=training_level,
+                knowledge_role=knowledge_role,
+                applicable_conditions=conds, contraindications=contra,
+                risk_tags=risk_tags, safe_alternatives=safe_alts, tags=tags,
                 category=doc.category, evidence_level=doc.evidence_level,
                 source_name=doc.source_name, source_url=doc.source_url,
             ))
         return chunks
     for i, m in enumerate(heads):
         ht = m.group(2).strip()
+        # 章节级元数据：检查标题前的 HTML 注释
+        text_before = body[max(0, m.start() - 500):m.start()]
+        ch_meta = _parse_chapter_meta(text_before)
         s = m.end()
         e = heads[i + 1].start() if i + 1 < len(heads) else len(body)
         c = body[s:e].strip()
@@ -125,11 +160,24 @@ def _split(body: str, doc: KnowledgeDocument, meta: dict) -> list[KnowledgeChunk
         if any(k in cp for k in ["增肌", "肌肉", "热量盈余"]):
             if GoalType.muscle_gain not in cgts:
                 cgts.append(GoalType.muscle_gain)
+        # 章节级元数据覆盖文档级默认值
+        ch_kr = ch_meta.get("knowledge_role", knowledge_role)
+        if ch_kr not in ("recommendation", "correction", "risk_warning", "alternative", "general"):
+            ch_kr = knowledge_role
+        ch_tl = ch_meta.get("training_level", training_level)
+        if ch_tl not in ("general", "beginner", "intermediate", "advanced"):
+            ch_tl = training_level
+        ch_contra = _norm_list(ch_meta.get("contraindications", contra))
+        ch_risk = _norm_list(ch_meta.get("risk_tags", risk_tags))
+        ch_alts = _norm_list(ch_meta.get("safe_alternatives", safe_alts))
+        ch_conds = _norm_list(ch_meta.get("applicable_conditions", conds))
         chunks.append(KnowledgeChunk(
             document_id=doc.document_id,
             title=f"{doc.title} - {ht}",
             content=c[:3000], topic=topic, goal_types=cgts,
-            applicable_conditions=conds, contraindications=contra, tags=tags,
+            training_level=ch_tl, knowledge_role=ch_kr,
+            applicable_conditions=ch_conds, contraindications=ch_contra,
+            risk_tags=ch_risk, safe_alternatives=ch_alts, tags=tags,
             category=doc.category, evidence_level=doc.evidence_level,
             source_name=doc.source_name, source_url=doc.source_url,
         ))

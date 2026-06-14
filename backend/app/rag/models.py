@@ -136,11 +136,26 @@ class KnowledgeChunk(BaseModel):
         default_factory=lambda: [Audience.general],
         description="适用人群",
     )
+    training_level: str = Field(
+        default="general",
+        description="适用训练水平：general / beginner / intermediate / advanced",
+    )
+    knowledge_role: str = Field(
+        default="general",
+        description="知识角色：recommendation / correction / risk_warning / alternative / general",
+    )
     applicable_conditions: list[str] = Field(
         default_factory=list, max_length=10, description="适用条件",
     )
     contraindications: list[str] = Field(
         default_factory=list, max_length=10, description="禁忌条件",
+    )
+    risk_tags: list[str] = Field(
+        default_factory=list, max_length=10,
+        description="风险标签：标记该块描述了哪些风险（用于区分风险知识和动作推荐）",
+    )
+    safe_alternatives: list[str] = Field(
+        default_factory=list, max_length=10, description="安全替代方案",
     )
     tags: list[str] = Field(
         default_factory=list, max_length=20, description="标签",
@@ -170,7 +185,10 @@ class KnowledgeChunk(BaseModel):
             self.content_hash = content_hash(self.content)
         return self
 
-    @field_validator("tags", "applicable_conditions", "contraindications", mode="before")
+    @field_validator(
+        "tags", "applicable_conditions", "contraindications",
+        "risk_tags", "safe_alternatives", mode="before",
+    )
     @classmethod
     def _normalize_str_list(cls, v: list) -> list:
         if not isinstance(v, list):

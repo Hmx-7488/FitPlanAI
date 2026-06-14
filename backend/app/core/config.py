@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     IMAGE_BASE_URL: str = "https://dashscope.aliyuncs.com/api/v1"
     IMAGE_GENERATION_ENABLED: bool = True
     DATABASE_URL: str = "sqlite+aiosqlite:///./slim_agent.db"
+    APP_ENV: str = "development"
+    KNOWLEDGE_ADMIN_KEY: str = ""
 
     model_config = {
         "env_file": str(BACKEND_DIR / ".env"),

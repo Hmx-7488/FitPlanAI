@@ -11,7 +11,7 @@ status: active
 tags: [chinese_meals, takeout, canteen, home_cooking, convenience_store]
 goal_types: [fat_loss, muscle_gain]
 audiences: [general]
-applicable_conditions: [chinese_diet]
+applicable_conditions: [chinese_diet, food_recognition, recipe_generation, meal_analysis]
 ---
 
 # 中国饮食习惯与减脂方案

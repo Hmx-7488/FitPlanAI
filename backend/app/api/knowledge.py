@@ -1,4 +1,6 @@
 """Knowledge management API endpoints."""
+import hmac
+
 from fastapi import APIRouter, Depends, Header, HTTPException
 
 from app.core.config import get_settings
@@ -14,13 +16,28 @@ router = APIRouter()
 def require_admin_key(x_admin_key: str = Header(default="")):
     """校验 X-Admin-Key 请求头。
 
-    如果配置了 KNOWLEDGE_ADMIN_KEY 则必须匹配；
-    未配置时（开发环境）放行。
+    规则：
+    - 配置了密钥：请求头必须使用安全比较匹配。
+    - development 且未配置密钥：放行。
+    - 非 development 且未配置密钥：拒绝（必须配置密钥）。
     """
     settings = get_settings()
-    expected = getattr(settings, "KNOWLEDGE_ADMIN_KEY", "")
-    if expected and x_admin_key != expected:
-        raise HTTPException(status_code=403, detail="Invalid or missing admin key")
+    expected = settings.KNOWLEDGE_ADMIN_KEY
+    is_dev = settings.APP_ENV == "development"
+
+    if expected:
+        # 密钥已配置，必须匹配（防时序攻击）
+        if not hmac.compare_digest(x_admin_key, expected):
+            raise HTTPException(status_code=403, detail="Invalid or missing admin key")
+        return
+
+    # 未配置密钥
+    if not is_dev:
+        raise HTTPException(
+            status_code=403,
+            detail="Admin key not configured; refusing access in non-development environment",
+        )
+    # development 且未配置密钥：放行
 
 
 # ── 公开接口（只读）──

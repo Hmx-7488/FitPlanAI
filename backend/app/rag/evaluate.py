@@ -45,8 +45,20 @@ _EVAL_CASES = [
     {
         "id": "insufficient_evidence",
         "query": "量子力学对减脂的影响",
-        "max_score_threshold": 0.65,
-        "description": "Should return low-confidence results for nonsensical query",
+        "must_be_empty_or_insufficient": True,
+        "description": "Should return insufficient evidence for nonsensical query",
+    },
+    {
+        "id": "off_topic_weather",
+        "query": "今天天气适合穿什么",
+        "must_be_empty_or_insufficient": True,
+        "description": "Should return insufficient evidence for off-topic query",
+    },
+    {
+        "id": "off_topic_programming",
+        "query": "Python如何读取文件",
+        "must_be_empty_or_insufficient": True,
+        "description": "Should return insufficient evidence for programming query",
     },
     {
         "id": "wrong_premise",

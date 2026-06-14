@@ -11,7 +11,7 @@ status: active
 tags: [fat_loss, calorie_deficit, bmr, tdee]
 goal_types: [fat_loss]
 audiences: [general]
-applicable_conditions: [calorie_deficit]
+applicable_conditions: [calorie_deficit, plan_generation, body_analysis]
 ---
 
 # 减脂核心原则

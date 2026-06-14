@@ -1,18 +1,18 @@
 ---
-title: 常见力量训练动作标准与纠错
+title: 常见力量训练动作标准与纠错（已拆分）
 category: exercise_technique
 source_name: NSCA动作标准
 source_url: https://www.nsca.com/
 published_at: 2020-01-01
 reviewed_at: 2026-06-10
 evidence_level: expert
-version: 1.0
-status: active
+version: "1.0"
+status: deprecated
 tags: [squat, deadlift, bench_press, push_up, pull_up, technique]
 goal_types: [general]
 audiences: [beginner, intermediate]
 applicable_conditions: []
-contraindications: [shoulder_injury, knee_injury, lower_back_injury]
+contraindications: []
 ---
 
 # 常见力量训练动作标准与纠错

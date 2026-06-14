@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import shutil
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -16,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 _BASE_DIR = Path(__file__).parent.parent.parent / "data"
 _VECTORSTORE_DIR = _BASE_DIR / "vectorstore"
-_INDEX_META_FILE = _BASE_DIR / "index_meta.json"
 
 
 class VectorStoreManager:
@@ -26,6 +26,29 @@ class VectorStoreManager:
         self._store: Optional[Chroma] = None
         self._index_version: str = ""
         self._last_rebuild: Optional[float] = None
+        self._stats = self._load_stats()
+        self._index_version = self._stats.index_version
+
+    @staticmethod
+    def _meta_file() -> Path:
+        return _BASE_DIR / "index_meta.json"
+
+    def _load_stats(self) -> IndexStats:
+        meta_file = self._meta_file()
+        if not meta_file.exists():
+            return IndexStats()
+        try:
+            return IndexStats.model_validate_json(meta_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("Failed to load index metadata: %s", exc)
+            return IndexStats()
+
+    def _save_stats(self, stats: IndexStats) -> None:
+        meta_file = self._meta_file()
+        meta_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp_file = meta_file.with_suffix(".json.tmp")
+        tmp_file.write_text(stats.model_dump_json(indent=2), encoding="utf-8")
+        tmp_file.replace(meta_file)
 
     def _get_embeddings(self) -> OpenAIEmbeddings:
         from app.core.config import get_settings
@@ -59,6 +82,11 @@ class VectorStoreManager:
 
         t0 = time.time()
         embeddings = self._get_embeddings()
+        previous_stats = self._stats
+        categories = {}
+        for chunk in chunks:
+            category = chunk.category.value
+            categories[category] = categories.get(category, 0) + 1
 
         # Prepare LangChain documents
         docs = []
@@ -74,9 +102,13 @@ class VectorStoreManager:
                 "source_name": ch.source_name,
                 "source_url": ch.source_url,
                 "topic": ch.topic,
+                "training_level": ch.training_level or "general",
+                "knowledge_role": ch.knowledge_role or "general",
                 "goal_types": ",".join(g.value for g in ch.goal_types),
                 "applicable_conditions": ",".join(ch.applicable_conditions),
                 "contraindications": ",".join(ch.contraindications),
+                "risk_tags": ",".join(ch.risk_tags),
+                "safe_alternatives": ",".join(ch.safe_alternatives),
                 "tags": ",".join(ch.tags),
                 "content_hash": ch.content_hash,
             }
@@ -131,6 +163,19 @@ class VectorStoreManager:
             self._index_version = f"v_{int(time.time())}"
             self._last_rebuild = time.time()
 
+            stats = IndexStats(
+                total_documents=len({chunk.document_id for chunk in chunks}),
+                total_chunks=len(chunks),
+                categories=categories,
+                index_version=self._index_version,
+                last_rebuild=datetime.now(UTC),
+                content_hashes=len({
+                    chunk.content_hash for chunk in chunks if chunk.content_hash
+                }),
+            )
+            self._save_stats(stats)
+            self._stats = stats
+
             # Cleanup backup
             if backup_dir.exists():
                 shutil.rmtree(backup_dir, ignore_errors=True)
@@ -140,6 +185,8 @@ class VectorStoreManager:
         except Exception as e:
             logger.error("Vectorstore build failed: %s", e)
             self._store = None
+            self._stats = previous_stats
+            self._index_version = previous_stats.index_version
             # 清理可能存在的损坏新目录
             if _VECTORSTORE_DIR.exists():
                 shutil.rmtree(_VECTORSTORE_DIR, ignore_errors=True)
@@ -152,19 +199,7 @@ class VectorStoreManager:
                 logger.info("Vectorstore restored from backup")
             raise
 
-        # Build stats
-        cats = {}
-        for ch in chunks:
-            c = ch.category.value
-            cats[c] = cats.get(c, 0) + 1
-
-        return IndexStats(
-            total_documents=len(set(ch.document_id for ch in chunks)),
-            total_chunks=len(chunks),
-            categories=cats,
-            index_version=self._index_version,
-            last_rebuild=None,
-        )
+        return stats
 
     def similarity_search(
         self, query: str, k: int = 5,
@@ -191,9 +226,13 @@ class VectorStoreManager:
                     source_name=meta.get("source_name", ""),
                     source_url=meta.get("source_url", ""),
                     topic=meta.get("topic", ""),
+                    training_level=meta.get("training_level", "general"),
+                    knowledge_role=meta.get("knowledge_role", "general"),
                     tags=meta.get("tags", "").split(",") if meta.get("tags") else [],
                     applicable_conditions=meta.get("applicable_conditions", "").split(",") if meta.get("applicable_conditions") else [],
                     contraindications=meta.get("contraindications", "").split(",") if meta.get("contraindications") else [],
+                    risk_tags=meta.get("risk_tags", "").split(",") if meta.get("risk_tags") else [],
+                    safe_alternatives=meta.get("safe_alternatives", "").split(",") if meta.get("safe_alternatives") else [],
                     content_hash=meta.get("content_hash", ""),
                 )
                 out.append((ch, max(0.0, min(1.0, score))))
@@ -205,15 +244,14 @@ class VectorStoreManager:
     def get_stats(self) -> IndexStats:
         store = self.get_store()
         if store is None:
-            return IndexStats()
+            return self._stats
         try:
             count = store._collection.count()
         except Exception:
             count = 0
-        return IndexStats(
-            total_chunks=count,
-            index_version=self._index_version,
-        )
+        if self._stats.total_chunks == count:
+            return self._stats
+        return self._stats.model_copy(update={"total_chunks": count})
 
 
 # Singleton

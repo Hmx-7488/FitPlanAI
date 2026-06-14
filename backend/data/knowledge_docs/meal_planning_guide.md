@@ -11,7 +11,7 @@ status: active
 tags: [macros, meal_planning, meal_timing, food_substitution]
 goal_types: [general]
 audiences: [general]
-applicable_conditions: []
+applicable_conditions: [plan_generation, meal_analysis]
 ---
 
 # 宏量营养素与餐次安排

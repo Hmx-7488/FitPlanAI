@@ -19,6 +19,7 @@ env/
 
 # 向量库（运行时自动生成）
 backend/data/vectorstore/
+backend/data/index_meta.json
 
 # IDE
 .vscode/
