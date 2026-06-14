@@ -98,3 +98,31 @@ class MealLog(Base):
     items_json: Mapped[str] = mapped_column(Text, default="[]")  # 识别的菜品列表
     meal_total_json: Mapped[str] = mapped_column(Text, default="{}")  # 本餐总营养
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ChatConversation(Base):
+    """聊天 Agent 会话。"""
+    __tablename__ = "chat_conversations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    title: Mapped[str] = mapped_column(String(100), default="新对话")
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class ChatMessage(Base):
+    """聊天消息及其引用、业务上下文摘要。"""
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[int] = mapped_column(Integer, index=True)
+    role: Mapped[str] = mapped_column(String(20))
+    content: Mapped[str] = mapped_column(Text, default="")
+    citations_json: Mapped[str] = mapped_column(Text, default="[]")
+    context_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(20), default="completed")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

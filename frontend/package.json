@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@lucide/vue": "^1.18.0",
     "axios": "^1.16.0",
     "element-plus": "^2.14.0",
     "gsap": "^3.15.0",

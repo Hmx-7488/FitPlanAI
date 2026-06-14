@@ -292,3 +292,37 @@ export interface MealDailySummary {
     created_at?: string
   } | null>
 }
+
+export interface ChatCitation {
+  chunk_id: string
+  title: string
+  category: string
+  source_name: string
+  source_url: string
+  evidence_level: string
+  score: number
+}
+
+export interface ChatMessage {
+  id: number
+  role: 'user' | 'assistant' | 'system'
+  content: string
+  citations: ChatCitation[]
+  context: Record<string, unknown>
+  status: string
+  created_at: string
+}
+
+export interface ChatConversation {
+  id: number
+  user_id: number
+  title: string
+  status: string
+  created_at: string
+  updated_at: string
+  last_message: string
+}
+
+export interface ChatConversationDetail extends ChatConversation {
+  messages: ChatMessage[]
+}

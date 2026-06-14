@@ -13,6 +13,7 @@ from app.api.pose import router as pose_router
 from app.api.meal import router as meal_router
 from app.api.dashboard import router as dashboard_router
 from app.api.knowledge import router as knowledge_router
+from app.api.chat import router as chat_router
 
 UPLOAD_DIR = Path(__file__).parent.parent / "data" / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -48,6 +49,7 @@ app.include_router(pose_router, prefix="/api/pose", tags=["动作分析"])
 app.include_router(meal_router, prefix="/api/meal", tags=["餐食热量识别"])
 app.include_router(dashboard_router, prefix="/api/dashboard", tags=["Dashboard"])
 app.include_router(knowledge_router, prefix="/api/knowledge", tags=["知识库"])
+app.include_router(chat_router, prefix="/api/chat", tags=["聊天 Agent"])
 
 # 静态文件：上传的图片
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")

@@ -12,6 +12,8 @@ import type {
   MealItem,
   MealAnalysis,
   MealDailySummary,
+  ChatConversation,
+  ChatConversationDetail,
 } from '../types'
 
 const api = axios.create({
@@ -279,4 +281,98 @@ export async function getMealDailySummary(userId: number, date?: string): Promis
   const query = date ? `?date=${encodeURIComponent(date)}` : ''
   const res = await api.get<MealDailySummary>(`/meal/daily-summary/${userId}${query}`)
   return res.data
+}
+
+// 聊天 Agent
+export async function createChatConversation(
+  userId: number,
+  title: string = '新对话'
+): Promise<ChatConversation> {
+  const res = await api.post<ChatConversation>('/chat/conversations', {
+    user_id: userId,
+    title,
+  })
+  return res.data
+}
+
+export async function getChatConversations(userId: number): Promise<ChatConversation[]> {
+  const res = await api.get<ChatConversation[]>(`/chat/conversations?user_id=${userId}`)
+  return res.data
+}
+
+export async function getChatConversation(
+  conversationId: number,
+  userId: number
+): Promise<ChatConversationDetail> {
+  const res = await api.get<ChatConversationDetail>(
+    `/chat/conversations/${conversationId}?user_id=${userId}`
+  )
+  return res.data
+}
+
+export async function archiveChatConversation(
+  conversationId: number,
+  userId: number
+): Promise<void> {
+  await api.delete(`/chat/conversations/${conversationId}?user_id=${userId}`)
+}
+
+export interface ChatStreamCallbacks {
+  onMeta?: (data: Record<string, unknown>) => void
+  onDelta?: (content: string) => void
+  onCitations?: (data: unknown[]) => void
+  onDone?: (data: unknown) => void
+  onError?: (message: string) => void
+}
+
+export async function streamChatMessage(
+  conversationId: number,
+  payload: {
+    user_id: number
+    content: string
+    current_page?: string
+    page_context?: Record<string, unknown>
+  },
+  callbacks: ChatStreamCallbacks,
+  signal?: AbortSignal
+): Promise<void> {
+  const response = await fetch(`/api/chat/conversations/${conversationId}/messages/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal,
+  })
+  if (!response.ok || !response.body) {
+    throw new Error(response.status === 404 ? '会话不存在' : '连接聊天服务失败')
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  const dispatch = (block: string) => {
+    let eventName = 'message'
+    const dataLines: string[] = []
+    for (const line of block.split('\n')) {
+      if (line.startsWith('event:')) eventName = line.slice(6).trim()
+      if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
+    }
+    if (!dataLines.length) return
+    const data = JSON.parse(dataLines.join('\n'))
+    if (eventName === 'meta') callbacks.onMeta?.(data)
+    if (eventName === 'delta') callbacks.onDelta?.(data.content || '')
+    if (eventName === 'citations') callbacks.onCitations?.(data)
+    if (eventName === 'done') callbacks.onDone?.(data)
+    if (eventName === 'error') callbacks.onError?.(data.message || '生成失败')
+  }
+
+  while (true) {
+    const { done, value } = await reader.read()
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done })
+    const blocks = buffer.split('\n\n')
+    buffer = blocks.pop() || ''
+    blocks.filter(Boolean).forEach(dispatch)
+    if (done) break
+  }
+  if (buffer.trim()) dispatch(buffer)
 }

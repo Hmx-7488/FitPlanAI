@@ -53,6 +53,11 @@ const router = createRouter({
       name: 'meal',
       component: () => import('../views/MealView.vue'),
     },
+    {
+      path: '/chat',
+      name: 'chat',
+      component: () => import('../views/ChatView.vue'),
+    },
   ],
 })
 

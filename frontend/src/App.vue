@@ -46,6 +46,7 @@ onMounted(() => {
           <router-link to="/pose" class="nav-link" active-class="nav-link--active">动作</router-link>
           <router-link to="/checkin" class="nav-link" active-class="nav-link--active">打卡</router-link>
           <router-link to="/history" class="nav-link" active-class="nav-link--active">复盘</router-link>
+          <router-link to="/chat" class="nav-link" active-class="nav-link--active">助手</router-link>
         </nav>
       </div>
     </header>
