@@ -15,6 +15,7 @@ from app.models.user import RecipeImageJob
 from app.schemas.vision import RecipeImage, RecipeItem
 from app.services.image_generation_service import (
     DashScopeImageError,
+    _download_file,
     _request_json,
     _result_image_url,
     _wan26_payload,
@@ -47,6 +48,58 @@ def sample_recipe(prompt: str = "鸡胸肉西兰花轻食成品") -> RecipeItem:
 
 
 class ImageProtocolTests(unittest.TestCase):
+    @patch("app.services.image_generation_service.urlopen")
+    def test_download_prefers_beijing_oss_over_accelerate_host(self, urlopen):
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"image-bytes"
+        urlopen.return_value = response
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "result.png"
+            _download_file(
+                "https://dashscope-a717.oss-accelerate.aliyuncs.com/path/result.png?token=1",
+                target,
+                attempts=1,
+            )
+
+        requested_host = urlopen.call_args.args[0].host
+        self.assertEqual(
+            requested_host,
+            "dashscope-a717.oss-cn-beijing.aliyuncs.com",
+        )
+
+    @patch("app.services.image_generation_service.time.sleep")
+    @patch("app.services.image_generation_service.urlopen")
+    def test_download_falls_back_to_accelerate_host(
+        self,
+        urlopen,
+        _sleep,
+    ):
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"image-bytes"
+        urlopen.side_effect = [
+            URLError(TimeoutError("regional endpoint timeout")),
+            response,
+        ]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "result.png"
+            _download_file(
+                "https://dashscope-a717.oss-accelerate.aliyuncs.com/path/result.png?token=1",
+                target,
+                attempts=1,
+            )
+            self.assertEqual(target.read_bytes(), b"image-bytes")
+
+        requested_hosts = [call.args[0].host for call in urlopen.call_args_list]
+        self.assertEqual(
+            requested_hosts,
+            [
+                "dashscope-a717.oss-cn-beijing.aliyuncs.com",
+                "dashscope-a717.oss-accelerate.aliyuncs.com",
+            ],
+        )
+
     @patch("app.services.image_generation_service.time.sleep")
     @patch("app.services.image_generation_service.urlopen")
     def test_request_json_retries_transient_ssl_eof(self, urlopen, _sleep):
@@ -146,7 +199,7 @@ class ImageProtocolTests(unittest.TestCase):
     def test_existing_task_is_resumed_without_duplicate_creation(
         self,
         request_json,
-        _sleep,
+        sleep,
         _download,
     ):
         request_json.return_value = {
@@ -177,6 +230,7 @@ class ImageProtocolTests(unittest.TestCase):
         self.assertEqual(result["task_id"], "existing-task")
         self.assertEqual(request_json.call_count, 1)
         self.assertIn("/tasks/existing-task", request_json.call_args.args[0])
+        sleep.assert_not_called()
 
 
 class RecipeImageJobTests(unittest.TestCase):

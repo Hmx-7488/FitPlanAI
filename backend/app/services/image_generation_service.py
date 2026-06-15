@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from http.client import RemoteDisconnected
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from app.core.config import get_settings
@@ -142,25 +142,55 @@ def _request_json(
 def _download_file(
     url: str,
     path: Path,
-    timeout: int = 60,
-    attempts: int = 4,
+    timeout: int = 30,
+    attempts: int = 2,
 ) -> None:
-    request = Request(url, headers={"User-Agent": "SlimAgent/1.0"})
-    for attempt in range(1, attempts + 1):
-        try:
-            with urlopen(request, timeout=timeout) as response:
-                path.write_bytes(response.read())
-                return
-        except (
-            URLError,
-            TimeoutError,
-            ConnectionError,
-            ssl.SSLError,
-            RemoteDisconnected,
-        ):
-            if attempt >= attempts:
-                raise
-            time.sleep(2 ** (attempt - 1))
+    parsed = urlparse(url)
+    candidates = [url]
+    accelerate_suffix = ".oss-accelerate.aliyuncs.com"
+    if parsed.hostname and parsed.hostname.endswith(accelerate_suffix):
+        bucket = parsed.hostname.removesuffix(accelerate_suffix)
+        regional_url = urlunparse(
+            parsed._replace(netloc=f"{bucket}.oss-cn-beijing.aliyuncs.com")
+        )
+        candidates = [regional_url, url]
+
+    last_error: BaseException | None = None
+    for candidate in candidates:
+        request = Request(candidate, headers={"User-Agent": "SlimAgent/1.0"})
+        hostname = urlparse(candidate).hostname
+        for attempt in range(1, max(1, attempts) + 1):
+            try:
+                with urlopen(request, timeout=timeout) as response:
+                    path.write_bytes(response.read())
+                    logger.info(
+                        "Recipe image downloaded host=%s bytes=%s",
+                        hostname,
+                        path.stat().st_size,
+                    )
+                    return
+            except (
+                URLError,
+                TimeoutError,
+                ConnectionError,
+                ssl.SSLError,
+                RemoteDisconnected,
+            ) as exc:
+                last_error = exc
+                logger.warning(
+                    "Recipe image download failed host=%s attempt=%s/%s "
+                    "error_type=%s message=%s",
+                    hostname,
+                    attempt,
+                    attempts,
+                    type(exc).__name__,
+                    str(getattr(exc, "reason", exc))[:300],
+                )
+                if attempt < attempts:
+                    time.sleep(2 ** (attempt - 1))
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("No recipe image download URL available")
 
 
 def _wan26_payload(prompt: str, model: str) -> dict:
@@ -297,8 +327,9 @@ def generate_recipe_image(
         task_url = f"{settings.IMAGE_BASE_URL.rstrip('/')}/tasks/{task_id}"
         task = {}
         consecutive_network_errors = 0
-        for _ in range(30):
-            time.sleep(5)
+        for poll_index in range(51):
+            if poll_index > 0:
+                time.sleep(3)
             try:
                 task = _request_json(
                     task_url,
@@ -374,9 +405,15 @@ def generate_recipe_image(
         saved_path = RECIPES_UPLOAD_DIR / filename
         try:
             _download_file(image_url, saved_path)
-        except (URLError, TimeoutError, ConnectionError) as exc:
+        except (
+            URLError,
+            TimeoutError,
+            ConnectionError,
+            ssl.SSLError,
+            RemoteDisconnected,
+        ) as exc:
             raise DashScopeImageError(
-                f"Unable to download generated image: {str(exc)[:300]}",
+                f"生成完成，但下载成品图失败：{str(exc)[:300]}",
                 code="NETWORK_ERROR",
                 request_id=request_id,
                 task_id=task_id,

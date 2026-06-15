@@ -17,7 +17,20 @@ from app.services.image_generation_service import generate_recipe_image
 
 logger = logging.getLogger(__name__)
 UPLOAD_DIR = Path(__file__).parent.parent.parent / "data" / "uploads"
-_generation_lock = asyncio.Lock()
+_generation_slots = asyncio.Semaphore(3)
+_submission_lock = asyncio.Lock()
+_last_submission_at = 0.0
+_MIN_SUBMISSION_INTERVAL_SECONDS = 1.05
+
+
+async def _wait_for_submission_slot() -> None:
+    global _last_submission_at
+    async with _submission_lock:
+        now = asyncio.get_running_loop().time()
+        remaining = _MIN_SUBMISSION_INTERVAL_SECONDS - (now - _last_submission_at)
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+        _last_submission_at = asyncio.get_running_loop().time()
 
 
 def image_prompt_hash(prompt: str, model: str) -> str:
@@ -155,7 +168,9 @@ async def process_recipe_image_job(job_id: int) -> None:
         provider_task_id = job.provider_task_id
         provider_request_id = job.provider_request_id
 
-    async with _generation_lock:
+    async with _generation_slots:
+        if not provider_task_id:
+            await _wait_for_submission_slot()
         result = await asyncio.to_thread(
             generate_recipe_image,
             prompt,
@@ -183,8 +198,9 @@ async def process_recipe_image_jobs(recipe_id: int) -> None:
     async with async_session() as db:
         jobs = await get_recipe_image_jobs(db, recipe_id)
         queued_ids = [job.id for job in jobs if job.status == "queued"]
-    for job_id in queued_ids:
-        await process_recipe_image_job(job_id)
+    await asyncio.gather(
+        *(process_recipe_image_job(job_id) for job_id in queued_ids)
+    )
 
 
 async def queue_recipe_image_retry(

@@ -158,7 +158,7 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(recipes[0].steps, "1. 煎熟鸡胸肉\n2. 混合蔬菜")
         self.assertEqual(recipes[0].shopping_list, ["生菜 100g"])
 
-    def test_image_generation_jobs_run_sequentially_to_avoid_provider_limits(self):
+    def test_image_generation_jobs_run_concurrently(self):
         from types import SimpleNamespace
         from app.services.recipe_image_service import process_recipe_image_jobs
 
@@ -168,9 +168,16 @@ class RecipeTests(unittest.TestCase):
             SimpleNamespace(id=13, status="queued"),
         ]
         processed = []
+        active = 0
+        max_active = 0
 
         async def fake_process(job_id):
+            nonlocal active, max_active
             processed.append(job_id)
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
 
         session = AsyncMock()
         session.__aenter__.return_value = session
@@ -192,7 +199,8 @@ class RecipeTests(unittest.TestCase):
         ):
             asyncio.run(process_recipe_image_jobs(7))
 
-        self.assertEqual(processed, [11, 13])
+        self.assertEqual(set(processed), {11, 13})
+        self.assertEqual(max_active, 2)
 
 
 # ═══════════════════════════════════════════════════════════════
