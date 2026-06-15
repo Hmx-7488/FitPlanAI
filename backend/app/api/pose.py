@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.models.user import User
 from app.services.image_utils import image_extension, validate_image
+from app.services.pose_metrics_service import compute_pose_metrics
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -248,6 +249,7 @@ async def _analyze_pose_frames(
     movement_key: str,
     movement_cn: str,
     is_video: bool,
+    quantitative: dict | None = None,
 ) -> dict | None:
     injuries = json.loads(user.injuries) if user.injuries else []
     injury_ctx = f"用户伤病史：{'、'.join(injuries)}。请把相关关节风险纳入建议。" if injuries else "用户未填写明确伤病史。"
@@ -268,6 +270,8 @@ async def _analyze_pose_frames(
     )
     prompt = (
         f"你是力量训练动作评估教练。下面是{media_desc}，动作类型：{movement_cn}。{injury_ctx}\n"
+        f"MediaPipe 关键点量化结果：{json.dumps(quantitative or {}, ensure_ascii=False)}\n"
+        "关键点结果中的角度、轨迹、速度、对称性和重复次数是计算值，不得被视觉猜测覆盖；你的任务是解释计算结果并补充可见动作语义。\n"
         "请只基于可见画面分析，不要编造看不到的角度；如果画面不完整，要降低置信并说明。\n"
         "评估维度：关节轨迹、躯干/脊柱稳定、动作幅度、节奏控制、左右对称、潜在伤病风险。\n"
         "输出严格 JSON，不要 markdown，不要额外文字。字段：\n"
@@ -300,7 +304,11 @@ async def _analyze_pose_frames(
         llm = get_vision_llm(max_tokens=900)
         response = llm.invoke([HumanMessage(content=content)])
         raw = response.content.strip()
-        logger.info("Vision Model raw pose %s response: %s", "video" if is_video else "image", raw)
+        logger.info(
+            "Vision pose response received: media=%s chars=%s",
+            "video" if is_video else "image",
+            len(raw),
+        )
         parsed = _extract_json_object(raw)
         result = _normalize_pose_result(parsed, movement_cn, is_video)
 
@@ -318,11 +326,65 @@ async def _analyze_pose_frames(
         return None
 
 
+def _keypoint_only_result(quantitative: dict, movement_cn: str) -> dict:
+    metrics = quantitative.get("metrics", [])
+    scores = [item["score"] for item in metrics if isinstance(item, dict) and "score" in item]
+    score = _clamp_int(sum(scores) / len(scores) if scores else 0, default=0)
+    quality = quantitative.get("quality", {})
+    return {
+        "movement_name": movement_cn,
+        "overall_score": score,
+        "score": score,
+        "risk_level": "medium" if score < 65 else "low",
+        "confidence": quality.get("confidence", 0),
+        "summary": "Vision Model 暂时不可用，当前结果仅由 MediaPipe 关键点几何数据计算。",
+        "metrics": metrics,
+        "issues": [],
+        "corrections": [],
+        "good_points": [],
+        "coach_cues": ["保持全身入镜", "动作匀速", "下一次使用相同机位复测"],
+        "phases": [],
+        "rep_count_estimate": quantitative.get("rep_count_estimate"),
+        "is_ai": False,
+    }
+
+
+def _merge_quantitative_result(result: dict, quantitative: dict) -> dict:
+    computed_metrics = quantitative.get("metrics", [])
+    computed_names = {item.get("name") for item in computed_metrics if isinstance(item, dict)}
+    semantic_metrics = [
+        item for item in result.get("metrics", [])
+        if item.get("name") not in computed_names
+    ]
+    result["metrics"] = computed_metrics + semantic_metrics[:3]
+    result["rep_count_estimate"] = quantitative.get("rep_count_estimate")
+    result["confidence"] = min(
+        float(result.get("confidence") or 0.6),
+        float(quantitative.get("quality", {}).get("confidence", 0.6)),
+    )
+    return result
+
+
+def _parse_pose_data(raw: str | None, movement_key: str) -> dict | None:
+    if not raw:
+        return None
+    if len(raw) > 2_000_000:
+        raise HTTPException(status_code=413, detail="关键点数据过大")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail="关键点数据格式无效") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="关键点数据必须是 JSON 对象")
+    return compute_pose_metrics(payload, movement_key)
+
+
 @router.post("/analyze")
 async def analyze_pose(
     user_id: int = Form(...),
     image: UploadFile = File(...),
     movement_name: str = Form("squat"),
+    pose_data: str | None = Form(None),
     db: AsyncSession = Depends(get_db),
 ):
     """上传动作照片，Vision Model 分析动作质量"""
@@ -343,13 +405,56 @@ async def analyze_pose(
 
     movement_key = movement_name.lower().replace(" ", "_")
     movement_cn = MOVEMENT_NAMES.get(movement_key, movement_name)
+    quantitative = _parse_pose_data(pose_data, movement_key)
 
-    result = await _analyze_pose_frames([(content, mime_type)], user, movement_key, movement_cn, is_video=False)
+    if quantitative and not quantitative["quality"]["is_usable"]:
+        return {
+            "analysis_id": f"pose_{uuid.uuid4().hex[:8]}",
+            "photo_url": f"/uploads/pose/{saved_name}",
+            "movement_name": movement_cn,
+            "overall_score": 0,
+            "score": 0,
+            "risk_level": "medium",
+            "summary": "照片未通过关键点质量校验，请确保全身关节清晰入镜后重试。",
+            "confidence": quantitative["quality"]["confidence"],
+            "metrics": [],
+            "issues": [],
+            "corrections": [],
+            "good_points": [],
+            "coach_cues": [],
+            "phases": [],
+            "rep_count_estimate": None,
+            "analyzed_frames": quantitative["sampled_frames"],
+            "risk_warnings": [],
+            "is_ai_analysis": False,
+            "is_quantitative_analysis": False,
+            "analysis_source": "rejected",
+            "analysis_status": "rejected",
+            "pose_quality": quantitative["quality"],
+            "joint_angles": {},
+            "media_type": "image",
+        }
 
-    # 降级到 Mock
+    result = await _analyze_pose_frames(
+        [(content, mime_type)],
+        user,
+        movement_key,
+        movement_cn,
+        is_video=False,
+        quantitative=quantitative,
+    )
+
+    analysis_source = "hybrid" if quantitative and quantitative.get("available") else "vision_only"
     if result is None:
-        template = MOCK_FALLBACK.get(movement_key, DEFAULT_MOCK)
-        result = {**template, "phases": [], "rep_count_estimate": None, "is_ai": False}
+        if quantitative and quantitative.get("available"):
+            result = _keypoint_only_result(quantitative, movement_cn)
+            analysis_source = "keypoint_only"
+        else:
+            template = MOCK_FALLBACK.get(movement_key, DEFAULT_MOCK)
+            result = {**template, "phases": [], "rep_count_estimate": None, "is_ai": False}
+            analysis_source = "template"
+    elif quantitative and quantitative.get("available"):
+        result = _merge_quantitative_result(result, quantitative)
 
     # 伤病风险提示
     risk_warnings = _build_risk_warnings(user, movement_key)
@@ -373,6 +478,11 @@ async def analyze_pose(
         "analyzed_frames": 1,
         "risk_warnings": risk_warnings,
         "is_ai_analysis": result.get("is_ai", False),
+        "is_quantitative_analysis": bool(quantitative and quantitative.get("available")),
+        "analysis_source": analysis_source,
+        "analysis_status": "completed" if analysis_source != "template" else "fallback",
+        "pose_quality": quantitative.get("quality") if quantitative else None,
+        "joint_angles": quantitative.get("joint_angles", {}) if quantitative else {},
         "media_type": "image",
     }
 
@@ -383,6 +493,7 @@ async def analyze_pose_video(
     video: UploadFile = File(...),
     frames: List[UploadFile] = File(...),
     movement_name: str = Form("squat"),
+    pose_data: str | None = Form(None),
     db: AsyncSession = Depends(get_db),
 ):
     """上传动作视频和前端抽帧，Vision Model 按时间序列分析动作质量"""
@@ -423,11 +534,57 @@ async def analyze_pose_video(
 
     movement_key = movement_name.lower().replace(" ", "_")
     movement_cn = MOVEMENT_NAMES.get(movement_key, movement_name)
-    result = await _analyze_pose_frames(frame_payloads, user, movement_key, movement_cn, is_video=True)
+    quantitative = _parse_pose_data(pose_data, movement_key)
 
+    if quantitative and not quantitative["quality"]["is_usable"]:
+        return {
+            "analysis_id": f"pose_{uuid.uuid4().hex[:8]}",
+            "video_url": f"/uploads/pose/{video_name}",
+            "frame_urls": frame_urls,
+            "movement_name": movement_cn,
+            "overall_score": 0,
+            "score": 0,
+            "risk_level": "medium",
+            "summary": "视频关键点覆盖不足，无法稳定计算关节角度和轨迹。请按拍摄提示重试。",
+            "confidence": quantitative["quality"]["confidence"],
+            "metrics": [],
+            "issues": [],
+            "corrections": [],
+            "good_points": [],
+            "coach_cues": [],
+            "phases": [],
+            "rep_count_estimate": None,
+            "analyzed_frames": quantitative["sampled_frames"],
+            "risk_warnings": [],
+            "is_ai_analysis": False,
+            "is_quantitative_analysis": False,
+            "analysis_source": "rejected",
+            "analysis_status": "rejected",
+            "pose_quality": quantitative["quality"],
+            "joint_angles": {},
+            "media_type": "video",
+        }
+
+    result = await _analyze_pose_frames(
+        frame_payloads,
+        user,
+        movement_key,
+        movement_cn,
+        is_video=True,
+        quantitative=quantitative,
+    )
+
+    analysis_source = "hybrid" if quantitative and quantitative.get("available") else "vision_only"
     if result is None:
-        template = MOCK_FALLBACK.get(movement_key, DEFAULT_MOCK)
-        result = {**template, "phases": [], "rep_count_estimate": None, "is_ai": False}
+        if quantitative and quantitative.get("available"):
+            result = _keypoint_only_result(quantitative, movement_cn)
+            analysis_source = "keypoint_only"
+        else:
+            template = MOCK_FALLBACK.get(movement_key, DEFAULT_MOCK)
+            result = {**template, "phases": [], "rep_count_estimate": None, "is_ai": False}
+            analysis_source = "template"
+    elif quantitative and quantitative.get("available"):
+        result = _merge_quantitative_result(result, quantitative)
 
     risk_warnings = _build_risk_warnings(user, movement_key)
 
@@ -448,8 +605,13 @@ async def analyze_pose_video(
         "coach_cues": result["coach_cues"],
         "phases": result.get("phases", []),
         "rep_count_estimate": result.get("rep_count_estimate"),
-        "analyzed_frames": len(frame_payloads),
+        "analyzed_frames": quantitative.get("sampled_frames", len(frame_payloads)) if quantitative else len(frame_payloads),
         "risk_warnings": risk_warnings,
         "is_ai_analysis": result.get("is_ai", False),
+        "is_quantitative_analysis": bool(quantitative and quantitative.get("available")),
+        "analysis_source": analysis_source,
+        "analysis_status": "completed" if analysis_source != "template" else "fallback",
+        "pose_quality": quantitative.get("quality") if quantitative else None,
+        "joint_angles": quantitative.get("joint_angles", {}) if quantitative else {},
         "media_type": "video",
     }

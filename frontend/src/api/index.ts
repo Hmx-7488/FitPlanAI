@@ -243,22 +243,35 @@ export async function getBodyAnalysisHistory(
 }
 
 // AI 动作分析
-export async function analyzePose(userId: number, imageFile: File, movementName: string) {
+export async function analyzePose(
+  userId: number,
+  imageFile: File,
+  movementName: string,
+  poseData?: unknown,
+) {
   const formData = new FormData()
   formData.append('user_id', String(userId))
   formData.append('image', imageFile)
   formData.append('movement_name', movementName)
+  if (poseData) formData.append('pose_data', JSON.stringify(poseData))
   const res = await api.post('/pose/analyze', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
   return res.data
 }
 
-export async function analyzePoseVideo(userId: number, videoFile: File, frames: File[], movementName: string) {
+export async function analyzePoseVideo(
+  userId: number,
+  videoFile: File,
+  frames: File[],
+  movementName: string,
+  poseData?: unknown,
+) {
   const formData = new FormData()
   formData.append('user_id', String(userId))
   formData.append('video', videoFile)
   formData.append('movement_name', movementName)
+  if (poseData) formData.append('pose_data', JSON.stringify(poseData))
   frames.forEach((frame, index) => {
     formData.append('frames', frame, `frame_${index}.jpg`)
   })

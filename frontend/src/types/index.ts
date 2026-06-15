@@ -262,6 +262,7 @@ export interface PoseMetric {
   name: string
   score: number
   description: string
+  source?: 'keypoints' | 'vision'
 }
 
 export interface PoseIssue {
@@ -307,6 +308,23 @@ export interface PoseAnalysis {
   coach_cues: string[]
   risk_warnings?: string[]
   is_ai_analysis?: boolean
+  is_quantitative_analysis?: boolean
+  analysis_source?: 'hybrid' | 'keypoint_only' | 'vision_only' | 'template' | 'rejected'
+  analysis_status?: 'completed' | 'fallback' | 'rejected'
+  pose_quality?: {
+    is_usable: boolean
+    average_visibility: number
+    usable_frame_ratio: number
+    edge_frame_ratio: number
+    issues: string[]
+    confidence: number
+  } | null
+  joint_angles?: Record<string, {
+    min: number
+    max: number
+    range: number
+    mean: number
+  }>
   /** @deprecated 使用 overall_score */
   score?: number
 }

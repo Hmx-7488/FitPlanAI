@@ -5,10 +5,15 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { analyzePose, analyzePoseVideo } from '../api'
 import type { PoseAnalysis } from '../types'
+import {
+  analyzePoseImage as extractImagePose,
+  analyzePoseVideo as extractVideoPose,
+} from '../services/poseLandmarker'
 import gsap from 'gsap'
 
 const router = useRouter()
 const loading = ref(false)
+const analysisStage = ref('')
 const selectedFile = ref<File | null>(null)
 const previewUrl = ref('')
 const result = ref<PoseAnalysis | null>(null)
@@ -69,65 +74,6 @@ function onFileChange(e: Event) {
   previewUrl.value = URL.createObjectURL(file)
 }
 
-function waitForEvent(target: EventTarget, eventName: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timeout = window.setTimeout(() => {
-      cleanup()
-      reject(new Error(`等待 ${eventName} 超时`))
-    }, 10000)
-    const cleanup = () => {
-      window.clearTimeout(timeout)
-      target.removeEventListener(eventName, onDone)
-      target.removeEventListener('error', onError)
-    }
-    const onDone = () => {
-      cleanup()
-      resolve()
-    }
-    const onError = () => {
-      cleanup()
-      reject(new Error('视频加载失败'))
-    }
-    target.addEventListener(eventName, onDone, { once: true })
-    target.addEventListener('error', onError, { once: true })
-  })
-}
-
-async function extractVideoFrames(file: File, frameCount = 5): Promise<File[]> {
-  const video = document.createElement('video')
-  video.preload = 'metadata'
-  video.muted = true
-  video.playsInline = true
-  video.src = URL.createObjectURL(file)
-
-  try {
-    await waitForEvent(video, 'loadedmetadata')
-    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 1
-    const canvas = document.createElement('canvas')
-    const width = Math.min(video.videoWidth || 720, 960)
-    const height = Math.max(1, Math.round(width * ((video.videoHeight || 540) / (video.videoWidth || 720))))
-    canvas.width = width
-    canvas.height = height
-    const ctx = canvas.getContext('2d')
-    if (!ctx) throw new Error('无法创建抽帧画布')
-
-    const frames: File[] = []
-    const points = Array.from({ length: frameCount }, (_, i) => (i + 1) / (frameCount + 1))
-    for (const pct of points) {
-      video.currentTime = Math.min(duration * pct, Math.max(duration - 0.05, 0))
-      await waitForEvent(video, 'seeked')
-      ctx.drawImage(video, 0, 0, width, height)
-      const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.82))
-      if (blob) {
-        frames.push(new File([blob], `pose_frame_${frames.length}.jpg`, { type: 'image/jpeg' }))
-      }
-    }
-    return frames
-  } finally {
-    URL.revokeObjectURL(video.src)
-  }
-}
-
 async function doAnalyze() {
   if (!selectedFile.value) return
   const userId = localStorage.getItem('userId')
@@ -139,22 +85,39 @@ async function doAnalyze() {
   loading.value = true
   try {
     if (selectedFile.value.type.startsWith('video/')) {
-      const frames = await extractVideoFrames(selectedFile.value)
+      analysisStage.value = '正在逐帧提取人体关键点...'
+      const { frames, payload } = await extractVideoPose(selectedFile.value)
       if (frames.length < 2) {
         throw new Error('视频抽帧失败，请换一个更清晰的视频')
       }
-      const res = await analyzePoseVideo(Number(userId), selectedFile.value, frames, selectedMovement.value)
+      analysisStage.value = '正在计算关节角度、轨迹和速度...'
+      const res = await analyzePoseVideo(
+        Number(userId),
+        selectedFile.value,
+        frames,
+        selectedMovement.value,
+        payload,
+      )
       result.value = res
     } else {
-      const res = await analyzePose(Number(userId), selectedFile.value, selectedMovement.value)
+      analysisStage.value = '正在检测人体关键点...'
+      const payload = await extractImagePose(selectedFile.value)
+      const res = await analyzePose(Number(userId), selectedFile.value, selectedMovement.value, payload)
       result.value = res
     }
     riskWarnings.value = result.value?.risk_warnings || []
-    ElMessage.success('分析完成')
+    if (result.value?.analysis_status === 'rejected') {
+      ElMessage.warning('拍摄质量不足，请按提示重新拍摄')
+    } else if (result.value?.analysis_source === 'template') {
+      ElMessage.warning('检测服务失败，当前仅显示模板参考')
+    } else {
+      ElMessage.success('分析完成')
+    }
   } catch (err: any) {
     ElMessage.error(err.response?.data?.detail || err.message || '分析失败')
   } finally {
     loading.value = false
+    analysisStage.value = ''
   }
 }
 
@@ -191,13 +154,33 @@ function metricColor(score: number): string {
   if (score >= 60) return 'var(--color-warning)'
   return 'var(--color-danger)'
 }
+
+function sourceLabel(source?: PoseAnalysis['analysis_source']) {
+  if (source === 'hybrid') return '关键点量化 + AI 解读'
+  if (source === 'keypoint_only') return '仅关键点量化'
+  if (source === 'vision_only') return '仅视觉估算'
+  if (source === 'template') return '模板参考'
+  if (source === 'rejected') return '质量未通过'
+  return '分析结果'
+}
+
+const jointLabels: Record<string, string> = {
+  left_knee: '左膝',
+  right_knee: '右膝',
+  left_hip: '左髋',
+  right_hip: '右髋',
+  left_elbow: '左肘',
+  right_elbow: '右肘',
+  left_shoulder: '左肩',
+  right_shoulder: '右肩',
+}
 </script>
 
 <template>
   <div class="pose-page" ref="pageRef">
     <div class="page-header">
       <h1>AI 动作分析</h1>
-      <p>上传训练动作照片或视频，AI 评估动作质量并给出纠正建议。</p>
+      <p>MediaPipe 逐帧计算关节角度、轨迹和速度，AI 负责解释动作问题与纠正建议。</p>
     </div>
 
     <!-- Upload -->
@@ -229,13 +212,13 @@ function metricColor(score: number): string {
         <div v-else class="upload-placeholder">
           <span class="upload-icon">&#127947;</span>
           <p>点击上传动作照片或视频</p>
-          <span class="upload-hint">视频建议 5-30 秒，侧面或正面拍摄，全身入镜</span>
+          <span class="upload-hint">视频建议 5-30 秒，固定机位拍摄，全身与手脚持续入镜</span>
         </div>
       </div>
       <input ref="fileInputRef" type="file" accept="image/*,video/*" style="display:none" @change="onFileChange" />
       <div class="upload-actions">
         <button class="btn btn-primary" :disabled="!selectedFile || loading" @click="doAnalyze">
-          {{ loading ? '分析中...' : '开始分析' }}
+          {{ loading ? (analysisStage || '分析中...') : '开始分析' }}
         </button>
       </div>
     </div>
@@ -244,8 +227,10 @@ function metricColor(score: number): string {
     <div v-if="result" class="result-section">
       <div class="result-header">
         <h2>{{ result.movement_name }} 分析结果</h2>
-        <span class="ai-badge" v-if="result.is_ai_analysis">AI 视觉分析</span>
-        <span class="mock-badge" v-else>模板分析</span>
+        <span
+          class="source-badge"
+          :class="`source-badge--${result.analysis_source || 'vision_only'}`"
+        >{{ sourceLabel(result.analysis_source) }}</span>
         <span class="risk-badge" :style="{ color: riskLevelColor(result.risk_level), borderColor: riskLevelColor(result.risk_level) }">
           {{ riskLevelLabel(result.risk_level) }}
         </span>
@@ -258,8 +243,21 @@ function metricColor(score: number): string {
         <img :src="result.photo_url" alt="动作照片" />
       </div>
 
+      <div v-if="result.analysis_source === 'template'" class="fallback-notice">
+        本次没有获得有效关键点或视觉分析结果。下方内容是通用动作模板，不代表系统检测到了这些问题。
+      </div>
+
+      <div v-if="result.analysis_status === 'rejected'" class="quality-rejection">
+        <h3>拍摄质量未通过</h3>
+        <p>{{ result.summary }}</p>
+        <ul>
+          <li v-for="issue in result.pose_quality?.issues" :key="issue">{{ issue }}</li>
+        </ul>
+        <p>请固定相机、保持全身和手脚入镜，避免遮挡，并从能看清主要关节运动的侧面或正面重拍。</p>
+      </div>
+
       <!-- Score -->
-      <div class="score-card">
+      <div v-else class="score-card">
         <div class="score-value">{{ result.overall_score }}</div>
         <div class="score-label">动作评分（满分 100）</div>
         <p v-if="result.summary" class="score-summary">{{ result.summary }}</p>
@@ -273,19 +271,34 @@ function metricColor(score: number): string {
           <span v-if="result.analyzed_frames" class="score-meta-item">
             分析 {{ result.analyzed_frames }} 帧
           </span>
+          <span v-if="result.pose_quality" class="score-meta-item">
+            有效帧 {{ Math.round(result.pose_quality.usable_frame_ratio * 100) }}%
+          </span>
         </div>
         <div class="score-bar-track">
           <div class="score-bar-fill" :style="{ width: result.overall_score + '%' }"></div>
         </div>
       </div>
 
+      <div class="card" v-if="result.analysis_status !== 'rejected' && Object.keys(result.joint_angles || {}).length">
+        <h3>关节角度范围</h3>
+        <div class="angle-grid">
+          <div v-for="(angle, joint) in result.joint_angles" :key="joint" class="angle-item">
+            <span>{{ jointLabels[String(joint)] || joint }}</span>
+            <b>{{ angle.min }}° - {{ angle.max }}°</b>
+            <small>变化 {{ angle.range }}°</small>
+          </div>
+        </div>
+      </div>
+
       <!-- Metrics -->
-      <div class="card" v-if="result.metrics?.length">
+      <div class="card" v-if="result.analysis_status !== 'rejected' && result.metrics?.length">
         <h3>维度评分</h3>
         <div class="metrics-grid">
           <div v-for="m in result.metrics" :key="m.name" class="metric-item">
             <div class="metric-header">
               <span class="metric-name">{{ m.name }}</span>
+              <span v-if="m.source === 'keypoints'" class="metric-source">实测</span>
               <span class="metric-score" :style="{ color: metricColor(m.score) }">{{ m.score }}</span>
             </div>
             <div class="metric-bar-track">
@@ -297,7 +310,7 @@ function metricColor(score: number): string {
       </div>
 
       <!-- Good points -->
-      <div class="card card--good" v-if="result.good_points?.length">
+      <div class="card card--good" v-if="result.analysis_status !== 'rejected' && result.good_points?.length">
         <h3>✅ 做得好的方面</h3>
         <div class="good-points">
           <span v-for="p in result.good_points" :key="p" class="good-tag">{{ p }}</span>
@@ -305,7 +318,7 @@ function metricColor(score: number): string {
       </div>
 
       <!-- Video phases -->
-      <div class="card" v-if="result.phases?.length">
+      <div class="card" v-if="result.analysis_status !== 'rejected' && result.phases?.length">
         <h3>视频阶段观察</h3>
         <div v-for="phase in result.phases" :key="phase.phase + phase.observation" class="phase-item">
           <span class="phase-name">{{ phase.phase }}</span>
@@ -314,7 +327,7 @@ function metricColor(score: number): string {
       </div>
 
       <!-- Issues -->
-      <div class="card" v-if="result.issues.length">
+      <div class="card" v-if="result.analysis_status !== 'rejected' && result.issues.length">
         <h3>问题项</h3>
         <div v-for="(issue, i) in result.issues" :key="i" class="issue-item">
           <div class="issue-top">
@@ -331,7 +344,7 @@ function metricColor(score: number): string {
       </div>
 
       <!-- Corrections -->
-      <div class="card card--corrections" v-if="result.corrections?.length">
+      <div class="card card--corrections" v-if="result.analysis_status !== 'rejected' && result.corrections?.length">
         <h3>🎯 纠正训练建议</h3>
         <div v-for="(c, i) in result.corrections" :key="i" class="correction-item">
           <div class="correction-area">{{ c.area }}</div>
@@ -347,7 +360,7 @@ function metricColor(score: number): string {
       </div>
 
       <!-- Coach cues -->
-      <div class="card card--accent">
+      <div class="card card--accent" v-if="result.analysis_status !== 'rejected' && result.coach_cues.length">
         <h3>教练提示</h3>
         <div class="cues">
           <span v-for="cue in result.coach_cues" :key="cue" class="cue-tag">{{ cue }}</span>
@@ -395,9 +408,15 @@ function metricColor(score: number): string {
 .result-section { display: flex; flex-direction: column; gap: var(--space-4); }
 .result-header { display: flex; align-items: center; gap: var(--space-3); }
 .result-header h2 { font-size: var(--text-xl); font-weight: 700; }
-.mock-badge { font-size: var(--text-xs); font-weight: 600; padding: 2px 8px; background: oklch(0.93 0.06 80); color: oklch(0.45 0.12 80); border-radius: var(--radius-sm); }
-.ai-badge { font-size: var(--text-xs); font-weight: 600; padding: 2px 8px; background: oklch(0.93 0.06 145); color: oklch(0.40 0.12 145); border-radius: var(--radius-sm); }
+.source-badge { font-size: var(--text-xs); font-weight: 700; padding: 3px 8px; border-radius: var(--radius-sm); }
+.source-badge--hybrid { background: oklch(0.93 0.06 145); color: oklch(0.40 0.12 145); }
+.source-badge--keypoint_only { background: oklch(0.93 0.04 230); color: oklch(0.42 0.12 230); }
+.source-badge--vision_only { background: oklch(0.94 0.04 250); color: oklch(0.43 0.10 250); }
+.source-badge--template, .source-badge--rejected { background: oklch(0.94 0.05 80); color: oklch(0.45 0.12 80); }
 .risk-badge { font-size: var(--text-xs); font-weight: 700; padding: 2px 10px; border: 1.5px solid; border-radius: var(--radius-sm); background: transparent; }
+.fallback-notice, .quality-rejection { padding: var(--space-4); border: 1px solid oklch(0.86 0.08 75); border-radius: var(--radius-md); background: oklch(0.96 0.04 80); color: var(--color-text-primary); line-height: var(--leading-relaxed); }
+.quality-rejection h3 { margin: 0 0 var(--space-2); }
+.quality-rejection p { margin: var(--space-2) 0; }
 
 .photo-preview img,
 .photo-preview video { max-width: 100%; max-height: 360px; border-radius: var(--radius-sm); }
@@ -423,6 +442,7 @@ function metricColor(score: number): string {
 .metric-item { display: flex; flex-direction: column; gap: var(--space-1); }
 .metric-header { display: flex; justify-content: space-between; align-items: baseline; }
 .metric-name { font-size: var(--text-sm); font-weight: 600; color: var(--color-text-primary); }
+.metric-source { margin-left: auto; margin-right: var(--space-2); padding: 1px 5px; border-radius: 3px; background: var(--color-accent-subtle); color: var(--color-accent); font-size: 10px; font-weight: 700; }
 .metric-score { font-size: var(--text-lg); font-weight: 800; font-family: var(--font-mono); }
 .metric-bar-track { height: 5px; background: var(--color-border-subtle); border-radius: 3px; overflow: hidden; }
 .metric-bar-fill { height: 100%; border-radius: 3px; transition: width var(--duration-normal) var(--ease-out); }
@@ -461,6 +481,10 @@ function metricColor(score: number): string {
 .cue-tag { font-size: var(--text-sm); font-weight: 600; padding: 4px 12px; background: var(--color-accent-subtle); color: var(--color-accent); border-radius: var(--radius-sm); }
 
 .risk-text { font-size: var(--text-base); color: var(--color-text-primary); margin-bottom: var(--space-2); }
+.angle-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
+.angle-item { display: grid; gap: 3px; padding: var(--space-3); border: 1px solid var(--color-border-subtle); border-radius: var(--radius-sm); }
+.angle-item span, .angle-item small { color: var(--color-text-tertiary); font-size: var(--text-xs); }
+.angle-item b { font-family: var(--font-mono); }
 
 .result-actions { display: flex; gap: var(--space-3); }
 
@@ -470,4 +494,10 @@ function metricColor(score: number): string {
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-ghost { background: transparent; color: var(--color-text-secondary); border: 1px solid var(--color-border); }
 .btn-ghost:hover { border-color: var(--color-text-tertiary); }
+
+@media (max-width: 640px) {
+  .result-header { align-items: flex-start; flex-wrap: wrap; }
+  .angle-grid { grid-template-columns: 1fr; }
+  .result-actions { flex-direction: column; }
+}
 </style>
