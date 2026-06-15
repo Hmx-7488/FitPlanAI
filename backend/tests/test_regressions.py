@@ -1,6 +1,6 @@
 import asyncio
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch, MagicMock
 
 from app.api.body import _coerce_body_fat_range
 from app.services.vision_service import _extract_json_array
@@ -158,28 +158,41 @@ class RecipeTests(unittest.TestCase):
         self.assertEqual(recipes[0].steps, "1. 煎熟鸡胸肉\n2. 混合蔬菜")
         self.assertEqual(recipes[0].shopping_list, ["生菜 100g"])
 
-    def test_image_generation_jobs_can_run_concurrently(self):
-        active = 0
-        peak = 0
+    def test_image_generation_jobs_run_sequentially_to_avoid_provider_limits(self):
+        from types import SimpleNamespace
+        from app.services.recipe_image_service import process_recipe_image_jobs
 
-        def fake_generate(index: int):
-            nonlocal active, peak
-            active += 1
-            peak = max(peak, active)
-            import time
-            time.sleep(0.03)
-            active -= 1
-            return index
+        jobs = [
+            SimpleNamespace(id=11, status="queued"),
+            SimpleNamespace(id=12, status="ready"),
+            SimpleNamespace(id=13, status="queued"),
+        ]
+        processed = []
 
-        async def run():
-            return await asyncio.gather(*[
-                asyncio.to_thread(fake_generate, index)
-                for index in range(3)
-            ])
+        async def fake_process(job_id):
+            processed.append(job_id)
 
-        with patch("app.services.vision_service.generate_recipe_image"):
-            self.assertEqual(asyncio.run(run()), [0, 1, 2])
-        self.assertGreaterEqual(peak, 2)
+        session = AsyncMock()
+        session.__aenter__.return_value = session
+        session.__aexit__.return_value = None
+
+        with (
+            patch(
+                "app.services.recipe_image_service.async_session",
+                return_value=session,
+            ),
+            patch(
+                "app.services.recipe_image_service.get_recipe_image_jobs",
+                new=AsyncMock(return_value=jobs),
+            ),
+            patch(
+                "app.services.recipe_image_service.process_recipe_image_job",
+                side_effect=fake_process,
+            ),
+        ):
+            asyncio.run(process_recipe_image_jobs(7))
+
+        self.assertEqual(processed, [11, 13])
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -86,6 +86,30 @@ class Recipe(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class RecipeImageJob(Base):
+    """Persistent state for one generated recipe image."""
+    __tablename__ = "recipe_image_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    recipe_id: Mapped[int] = mapped_column(Integer, index=True)
+    recipe_index: Mapped[int] = mapped_column(Integer)
+    prompt: Mapped[str] = mapped_column(Text)
+    prompt_hash: Mapped[str] = mapped_column(String(64), index=True)
+    model: Mapped[str] = mapped_column(String(80))
+    status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
+    image_url: Mapped[str] = mapped_column(Text, default="")
+    provider_task_id: Mapped[str] = mapped_column(String(100), default="")
+    provider_request_id: Mapped[str] = mapped_column(String(100), default="")
+    error_code: Mapped[str] = mapped_column(String(100), default="")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    cache_hit: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class MealLog(Base):
     """餐食热量识别记录"""
     __tablename__ = "meal_logs"

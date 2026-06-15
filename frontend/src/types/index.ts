@@ -127,6 +127,24 @@ export interface RecipeImage {
   alt: string
   generation_prompt: string
   status?: string
+  model?: string
+  error_message?: string
+  retry_count?: number
+  cache_hit?: boolean
+}
+
+export interface RecipeImageJob {
+  id: number
+  recipe_id: number
+  recipe_index: number
+  status: 'queued' | 'generating' | 'ready' | 'failed'
+  image_url: string
+  model: string
+  error_code: string
+  error_message: string
+  retry_count: number
+  cache_hit: boolean
+  updated_at?: string
 }
 
 export interface RecipeItem {

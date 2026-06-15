@@ -40,6 +40,24 @@ class RecipeImage(BaseModel):
     alt: str = "菜谱成品图"
     generation_prompt: str = ""  # 图片生成提示词
     status: str = "placeholder"
+    model: str = ""
+    error_message: str = ""
+    retry_count: int = 0
+    cache_hit: bool = False
+
+
+class RecipeImageJobResponse(BaseModel):
+    id: int
+    recipe_id: int
+    recipe_index: int
+    status: str
+    image_url: str = ""
+    model: str
+    error_code: str = ""
+    error_message: str = ""
+    retry_count: int = 0
+    cache_hit: bool = False
+    updated_at: Optional[datetime] = None
 
 
 class SubstituteItem(BaseModel):

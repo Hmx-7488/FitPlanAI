@@ -1,8 +1,14 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick, useTemplateRef, watch } from 'vue'
+import { computed, ref, onMounted, onUnmounted, nextTick, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { recognizeIngredients, confirmIngredients, generateRecipes, getLatestRecipe } from '../api'
+import {
+  recognizeIngredients,
+  confirmIngredients,
+  generateRecipes,
+  getLatestRecipe,
+  retryRecipeImage,
+} from '../api'
 import type { IngredientItem, RecognizeResponse, RecipeItem, RecipeResponse } from '../types'
 import { sanitizeHtml } from '../utils/sanitize'
 import gsap from 'gsap'
@@ -20,6 +26,13 @@ const editableIngredients = ref<IngredientItem[]>([])
 const recipes = ref<RecipeResponse | null>(null)
 const loadingMsg = ref('')
 const selectedImage = ref<{ url: string; alt: string } | null>(null)
+let imagePollTimer: ReturnType<typeof setTimeout> | null = null
+
+const hasPendingImages = computed(() =>
+  Boolean(recipes.value?.recipes.some(recipe =>
+    ['queued', 'generating', 'placeholder'].includes(recipe.image?.status || 'placeholder')
+  ))
+)
 
 function animateStep() {
   nextTick(() => {
@@ -118,6 +131,7 @@ async function doConfirmAndGenerate() {
     )
     recipes.value = result
     step.value = 'result'
+    startImagePolling()
     ElMessage.success('菜谱生成成功')
   } catch (err: any) {
     ElMessage.error(err.response?.data?.detail || '生成失败')
@@ -171,6 +185,56 @@ function hasFinishedImage(recipe: RecipeItem): boolean {
   )
 }
 
+function stopImagePolling() {
+  if (imagePollTimer) {
+    clearTimeout(imagePollTimer)
+    imagePollTimer = null
+  }
+}
+
+async function refreshRecipeImages() {
+  const userId = Number(localStorage.getItem('userId'))
+  if (!userId || !recipes.value) return
+  try {
+    const latest = await getLatestRecipe(userId)
+    if (latest?.recipe_id === recipes.value.recipe_id) {
+      recipes.value = latest
+    }
+  } finally {
+    if (hasPendingImages.value) {
+      imagePollTimer = setTimeout(refreshRecipeImages, 3000)
+    } else {
+      stopImagePolling()
+    }
+  }
+}
+
+function startImagePolling() {
+  stopImagePolling()
+  if (hasPendingImages.value) {
+    imagePollTimer = setTimeout(refreshRecipeImages, 1200)
+  }
+}
+
+async function retryFinishedImage(index: number) {
+  const userId = Number(localStorage.getItem('userId'))
+  if (!userId || !recipes.value) return
+  const recipe = recipes.value.recipes[index]
+  recipe.image.status = 'queued'
+  recipe.image.error_message = ''
+  try {
+    const job = await retryRecipeImage(recipes.value.recipe_id, index, userId)
+    recipe.image.status = job.status
+    recipe.image.retry_count = job.retry_count
+    ElMessage.success('成品图已重新加入生成队列')
+    startImagePolling()
+  } catch (err: any) {
+    recipe.image.status = 'failed'
+    recipe.image.error_message = err.response?.data?.detail || '重试失败'
+    ElMessage.error(recipe.image.error_message)
+  }
+}
+
 // 页面加载时恢复已有菜谱
 onMounted(async () => {
   const userId = localStorage.getItem('userId')
@@ -180,9 +244,12 @@ onMounted(async () => {
     if (existing && existing.recipe_content) {
       recipes.value = existing as RecipeResponse
       step.value = 'result'
+      startImagePolling()
     }
   } catch { /* ignore */ }
 })
+
+onUnmounted(stopImagePolling)
 </script>
 
 <template>
@@ -330,13 +397,35 @@ onMounted(async () => {
             <button
               class="recipe-finished-image"
               type="button"
-              :aria-label="`查看${r.image.alt || r.name}成品图大图`"
+              :aria-label="`查看${r.image.alt || `${r.name}成品图`}大图`"
               @click="openRecipeImage(r.image.url, r.image.alt || `${r.name}成品图`)"
             >
               <img :src="r.image.url" :alt="r.image.alt || `${r.name}成品图`" class="recipe-image" />
               <span class="recipe-image-label">成品图</span>
               <span class="recipe-image-zoom" aria-hidden="true">↗</span>
+              <span v-if="r.image.cache_hit" class="recipe-image-cache">已复用</span>
             </button>
+          </section>
+          <section
+            v-else-if="['queued', 'generating', 'placeholder'].includes(r.image?.status || 'placeholder')"
+            class="recipe-finished"
+          >
+            <h4 class="recipe-section-title">成品图</h4>
+            <div class="recipe-image-state recipe-image-state--loading" aria-live="polite">
+              <span class="image-state-spinner" />
+              <strong>{{ r.image?.status === 'generating' ? 'AI 正在生成成品图' : '成品图等待生成' }}</strong>
+              <span>菜谱内容可以先查看，图片完成后会自动显示。</span>
+            </div>
+          </section>
+          <section v-else class="recipe-finished">
+            <h4 class="recipe-section-title">成品图</h4>
+            <div class="recipe-image-state recipe-image-state--failed">
+              <strong>成品图生成失败</strong>
+              <span>{{ r.image?.error_message || '图片服务暂时不可用，请稍后重试。' }}</span>
+              <button class="btn btn-secondary image-retry-button" @click="retryFinishedImage(index)">
+                重新生成
+              </button>
+            </div>
           </section>
           <!-- 替代食材 -->
           <div v-if="r.substitute_ingredients?.length" class="recipe-substitutes">
@@ -518,6 +607,18 @@ onMounted(async () => {
   font-weight: 700;
   pointer-events: none;
 }
+.recipe-image-cache {
+  position: absolute;
+  right: var(--space-3);
+  top: var(--space-3);
+  padding: 3px 9px;
+  border-radius: var(--radius-sm);
+  background: oklch(0.92 0.05 145 / 0.94);
+  color: oklch(0.36 0.1 145);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  pointer-events: none;
+}
 .recipe-image-zoom {
   position: absolute;
   right: var(--space-3);
@@ -568,6 +669,54 @@ onMounted(async () => {
   background: var(--color-border-subtle);
   color: inherit;
   cursor: zoom-in;
+}
+.recipe-image-state {
+  min-height: 190px;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: var(--space-2);
+  padding: var(--space-5);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--color-text-secondary);
+  text-align: center;
+}
+.recipe-image-state strong {
+  color: var(--color-text-primary);
+}
+.recipe-image-state span {
+  font-size: var(--text-sm);
+}
+.recipe-image-state--loading {
+  background: linear-gradient(
+    100deg,
+    var(--color-surface) 20%,
+    var(--color-surface-raised) 45%,
+    var(--color-surface) 70%
+  );
+  background-size: 200% 100%;
+  animation: image-loading 1.8s linear infinite;
+}
+.recipe-image-state--failed {
+  background: oklch(0.97 0.02 25);
+}
+.image-state-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid var(--color-border);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: image-spin 0.8s linear infinite;
+}
+.image-retry-button {
+  margin-top: var(--space-2);
+}
+@keyframes image-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes image-loading {
+  to { background-position: -200% 0; }
 }
 .recipe-substitutes { margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--color-border-subtle); }
 .sub-title { font-size: var(--text-xs); font-weight: 700; color: var(--color-text-tertiary); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: var(--space-2); }

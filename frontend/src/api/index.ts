@@ -8,6 +8,7 @@ import type {
   ReviewResponse,
   RecognizeResponse,
   RecipeResponse,
+  RecipeImageJob,
   IngredientItem,
   MealItem,
   MealAnalysis,
@@ -134,6 +135,27 @@ export async function getLatestRecipe(userId: number): Promise<RecipeResponse | 
   } catch {
     return null
   }
+}
+
+export async function getRecipeImageJobs(
+  recipeId: number,
+  userId: number
+): Promise<RecipeImageJob[]> {
+  const res = await api.get<RecipeImageJob[]>(
+    `/vision/recipes/${recipeId}/images?user_id=${userId}`
+  )
+  return res.data
+}
+
+export async function retryRecipeImage(
+  recipeId: number,
+  recipeIndex: number,
+  userId: number
+): Promise<RecipeImageJob> {
+  const res = await api.post<RecipeImageJob>(
+    `/vision/recipes/${recipeId}/images/${recipeIndex}/retry?user_id=${userId}`
+  )
+  return res.data
 }
 
 // Dashboard 聚合数据

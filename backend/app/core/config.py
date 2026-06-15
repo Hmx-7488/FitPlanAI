@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     LLM_MODEL: str = "qwen-plus"
     VISION_MODEL: str = "qwen-vl-plus"
-    IMAGE_MODEL: str = "wanx2.1-t2i-turbo"
+    IMAGE_MODEL: str = "wan2.6-t2i"
     IMAGE_BASE_URL: str = "https://dashscope.aliyuncs.com/api/v1"
     IMAGE_GENERATION_ENABLED: bool = True
     DATABASE_URL: str = "sqlite+aiosqlite:///./slim_agent.db"

@@ -2,13 +2,22 @@
 
 import json
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, Query
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.schemas.vision import (
     ConfirmRequest, ConfirmResponse,
-    RecipeImage, RecipeRequest, RecipeResponse, RecognizeResponse,
+    RecipeImageJobResponse, RecipeRequest, RecipeResponse, RecognizeResponse,
+)
+from app.models.user import IngredientRecognition, Recipe
+from app.services.recipe_image_service import (
+    apply_job_to_recipe_image,
+    get_recipe_image_jobs,
+    import_legacy_recipe_image_jobs,
+    process_recipe_image_job,
+    process_recipe_image_jobs,
+    queue_recipe_image_retry,
 )
 from app.services.vision_service import (
     recognize_ingredients, confirm_ingredients, generate_recipes,
@@ -65,11 +74,14 @@ async def confirm_user_ingredients(
 @router.post("/recipes", response_model=RecipeResponse)
 async def generate_user_recipes(
     request: RecipeRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """基于确认的食材生成轻食菜谱"""
     try:
-        return await generate_recipes(db, request)
+        response = await generate_recipes(db, request)
+        background_tasks.add_task(process_recipe_image_jobs, response.recipe_id)
+        return response
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -79,7 +91,6 @@ async def generate_user_recipes(
 @router.get("/recipes/latest/{user_id}")
 async def get_latest_recipe(user_id: int, db: AsyncSession = Depends(get_db)):
     """获取用户最新的菜谱（含解析后的 recipes 列表）"""
-    from app.models.user import IngredientRecognition, Recipe
     from app.services.vision_service import _parse_recipes
     stmt = select(Recipe).where(Recipe.user_id == user_id).order_by(desc(Recipe.created_at)).limit(1)
     result = await db.execute(stmt)
@@ -94,9 +105,16 @@ async def get_latest_recipe(user_id: int, db: AsyncSession = Depends(get_db)):
     # 从 recipe_content 重新解析出结构化菜谱
     recipes_list = _parse_recipes(recipe.recipe_content, [])
     recipe_images = nutrition.get("recipe_images", [])
+    image_jobs = await import_legacy_recipe_image_jobs(
+        db,
+        recipe.id,
+        recipes_list,
+        recipe_images,
+    )
+    jobs_by_index = {job.recipe_index: job for job in image_jobs}
     for index, recipe_item in enumerate(recipes_list):
-        if index < len(recipe_images):
-            recipe_item.image = RecipeImage.model_validate(recipe_images[index])
+        if index in jobs_by_index:
+            apply_job_to_recipe_image(recipe_item.image, jobs_by_index[index])
     recipes_dicts = [r.model_dump() for r in recipes_list]
 
     return {
@@ -110,3 +128,56 @@ async def get_latest_recipe(user_id: int, db: AsyncSession = Depends(get_db)):
         "total_protein": nutrition.get("total_protein", 0),
         "created_at": recipe.created_at.isoformat() if recipe.created_at else None,
     }
+
+
+def _job_response(job) -> RecipeImageJobResponse:
+    return RecipeImageJobResponse(
+        id=job.id,
+        recipe_id=job.recipe_id,
+        recipe_index=job.recipe_index,
+        status=job.status,
+        image_url=job.image_url,
+        model=job.model,
+        error_code=job.error_code,
+        error_message=job.error_message,
+        retry_count=job.retry_count,
+        cache_hit=bool(job.cache_hit),
+        updated_at=job.updated_at,
+    )
+
+
+@router.get(
+    "/recipes/{recipe_id}/images",
+    response_model=list[RecipeImageJobResponse],
+)
+async def get_recipe_images(
+    recipe_id: int,
+    user_id: int = Query(gt=0),
+    db: AsyncSession = Depends(get_db),
+):
+    recipe = await db.get(Recipe, recipe_id)
+    if recipe is None or recipe.user_id != user_id:
+        raise HTTPException(status_code=404, detail="菜谱不存在")
+    return [_job_response(job) for job in await get_recipe_image_jobs(db, recipe_id)]
+
+
+@router.post(
+    "/recipes/{recipe_id}/images/{recipe_index}/retry",
+    response_model=RecipeImageJobResponse,
+)
+async def retry_recipe_image(
+    recipe_id: int,
+    recipe_index: int,
+    background_tasks: BackgroundTasks,
+    user_id: int = Query(gt=0),
+    db: AsyncSession = Depends(get_db),
+):
+    recipe = await db.get(Recipe, recipe_id)
+    if recipe is None or recipe.user_id != user_id:
+        raise HTTPException(status_code=404, detail="菜谱不存在")
+    job = await queue_recipe_image_retry(db, recipe_id, recipe_index)
+    if job is None:
+        raise HTTPException(status_code=404, detail="图片任务不存在")
+    if job.status == "queued":
+        background_tasks.add_task(process_recipe_image_job, job.id)
+    return _job_response(job)

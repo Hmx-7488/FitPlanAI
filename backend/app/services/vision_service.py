@@ -4,7 +4,6 @@ import json
 import base64
 import uuid
 import re
-import asyncio
 from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 from langchain_openai import ChatOpenAI
@@ -16,8 +15,8 @@ from app.schemas.vision import (
     RecipeRequest, RecipeItem, RecipeImage, RecipeResponse, SubstituteItem,
 )
 from app.rag.retriever import retrieve_knowledge
-from app.services.image_generation_service import generate_recipe_image
 from app.services.image_utils import image_extension
+from app.services.recipe_image_service import prepare_recipe_image_jobs
 
 settings = get_settings()
 
@@ -289,23 +288,7 @@ async def generate_recipes(db: AsyncSession, request: RecipeRequest) -> RecipeRe
     await db.commit()
     await db.refresh(recipe)
 
-    image_results = await asyncio.gather(*[
-        asyncio.to_thread(generate_recipe_image, item.image.generation_prompt, recipe.id, index)
-        for index, item in enumerate(recipes)
-    ])
-    recipe_images = []
-    for item, image_result in zip(recipes, image_results):
-        item.image.url = image_result["url"]
-        item.image.status = image_result["status"]
-        recipe_images.append(item.image.model_dump())
-
-    recipe.nutrition_json = json.dumps({
-        "total_calories": sum(r.calories_est for r in recipes),
-        "total_protein": sum(r.protein_est for r in recipes),
-        "recipe_images": recipe_images,
-    }, ensure_ascii=False)
-    await db.commit()
-    await db.refresh(recipe)
+    await prepare_recipe_image_jobs(db, recipe.id, recipes)
 
     return RecipeResponse(
         recipe_id=recipe.id,
@@ -401,8 +384,10 @@ def _build_structured_recipe(data: dict, available: list[IngredientItem]) -> Rec
         image=RecipeImage(
             alt=f"{name}成品图",
             generation_prompt=(
-                f"真实食物摄影风格的{name}，使用{image_ingredients}，"
-                "白色餐盘，自然光，健康轻食成品，45度俯拍，无文字"
+                f"菜品名称：{name}。主要食材及用量：{image_ingredients}。"
+                f"烹饪与摆盘应与以下做法一致：{steps_text[:240]}。"
+                "单人份健康轻食成品，所有主要食材清晰可见，颜色自然，"
+                "白色或浅色餐盘，真实食物摄影，自然日光，45度视角，背景简洁"
             ),
         ),
         missing_ingredients=[
@@ -475,14 +460,17 @@ def _build_recipe(name: str, lines: list[str], ingredients: list[IngredientItem]
     # 生成图片生成提示词
     ingredients_text = "、".join(used[:4])
     generation_prompt = (
-        f"真实食物摄影风格的{name}，使用{ingredients_text}，"
-        f"白色餐盘，自然光，高蛋白轻食餐，俯拍角度"
+        f"菜品名称：{name}。主要食材：{ingredients_text}。"
+        f"烹饪与摆盘应符合以下做法：{steps[:240]}。"
+        "单人份健康轻食成品，所有主要食材清晰可见，颜色自然，"
+        "白色或浅色餐盘，真实食物摄影，自然日光，45度视角，背景简洁"
     )
 
     image = RecipeImage(
-        url="/uploads/recipes/default-recipe.png",
+        url="",
         alt=f"{name}成品图",
         generation_prompt=generation_prompt,
+        status="queued",
     )
 
     # 食材缺口分析：识别菜谱中提到但用户没有的食材
