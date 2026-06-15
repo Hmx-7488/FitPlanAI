@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import logging
+import socket
+import ssl
 import time
 import uuid
 from dataclasses import asdict, dataclass
+from http.client import RemoteDisconnected
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from app.core.config import get_settings
@@ -45,11 +50,43 @@ class DashScopeImageError(RuntimeError):
         self.task_id = task_id
 
 
+def _uses_mihomo_fake_ip(url: str) -> bool:
+    hostname = urlparse(url).hostname
+    if not hostname:
+        return False
+    try:
+        addresses = {
+            item[4][0]
+            for item in socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
+        }
+    except OSError:
+        return False
+    fake_ip_network = ipaddress.ip_network("198.18.0.0/15")
+    return any(
+        ipaddress.ip_address(address) in fake_ip_network
+        for address in addresses
+        if ":" not in address
+    )
+
+
+def _network_error_message(url: str, exc: BaseException) -> str:
+    reason = str(getattr(exc, "reason", exc))[:300]
+    message = f"连接 DashScope 图片服务失败：{reason}"
+    if _uses_mihomo_fake_ip(url):
+        message += (
+            "。检测到域名由 Mihomo/TUN Fake-IP 接管，请检查代理节点或将 "
+            "dashscope.aliyuncs.com 配置为稳定可用的代理规则后重试"
+        )
+    return message
+
+
 def _request_json(
     url: str,
     headers: dict,
     payload: dict | None = None,
     timeout: int = 120,
+    attempts: int = 1,
+    retry_delay_seconds: float = 1.0,
 ) -> dict:
     data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = Request(
@@ -58,32 +95,72 @@ def _request_json(
         headers=headers,
         method="GET" if payload is None else "POST",
     )
-    try:
-        with urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
+    total_attempts = max(1, attempts)
+    for attempt in range(1, total_attempts + 1):
         try:
-            detail = json.loads(body)
-        except json.JSONDecodeError:
-            detail = {}
-        raise DashScopeImageError(
-            detail.get("message") or f"DashScope HTTP {exc.code}",
-            code=detail.get("code") or f"HTTP_{exc.code}",
-            request_id=detail.get("request_id", ""),
-        ) from exc
-    except URLError as exc:
-        reason = str(getattr(exc, "reason", exc))[:300]
-        raise DashScopeImageError(
-            f"Unable to connect to DashScope image service: {reason}",
-            code="NETWORK_ERROR",
-        ) from exc
+            with urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            try:
+                detail = json.loads(body)
+            except json.JSONDecodeError:
+                detail = {}
+            raise DashScopeImageError(
+                detail.get("message") or f"DashScope HTTP {exc.code}",
+                code=detail.get("code") or f"HTTP_{exc.code}",
+                request_id=detail.get("request_id", ""),
+            ) from exc
+        except (
+            URLError,
+            TimeoutError,
+            ConnectionError,
+            ssl.SSLError,
+            RemoteDisconnected,
+        ) as exc:
+            if attempt >= total_attempts:
+                raise DashScopeImageError(
+                    _network_error_message(url, exc),
+                    code="NETWORK_ERROR",
+                ) from exc
+            delay = retry_delay_seconds * (2 ** (attempt - 1))
+            logger.warning(
+                "Transient DashScope transport failure method=%s attempt=%s/%s "
+                "error_type=%s message=%s; retrying in %.1fs",
+                request.method,
+                attempt,
+                total_attempts,
+                type(exc).__name__,
+                str(getattr(exc, "reason", exc))[:300],
+                delay,
+            )
+            time.sleep(delay)
+
+    raise AssertionError("unreachable")
 
 
-def _download_file(url: str, path: Path, timeout: int = 120) -> None:
+def _download_file(
+    url: str,
+    path: Path,
+    timeout: int = 60,
+    attempts: int = 4,
+) -> None:
     request = Request(url, headers={"User-Agent": "SlimAgent/1.0"})
-    with urlopen(request, timeout=timeout) as response:
-        path.write_bytes(response.read())
+    for attempt in range(1, attempts + 1):
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                path.write_bytes(response.read())
+                return
+        except (
+            URLError,
+            TimeoutError,
+            ConnectionError,
+            ssl.SSLError,
+            RemoteDisconnected,
+        ):
+            if attempt >= attempts:
+                raise
+            time.sleep(2 ** (attempt - 1))
 
 
 def _wan26_payload(prompt: str, model: str) -> dict:
@@ -193,7 +270,13 @@ def generate_recipe_image(
                 model,
                 len(final_prompt),
             )
-            created = _request_json(endpoint, headers, payload)
+            created = _request_json(
+                endpoint,
+                headers,
+                payload,
+                timeout=45,
+                attempts=4,
+            )
             request_id = created.get("request_id", "")
             task_id = (created.get("output") or {}).get("task_id", "")
             if not task_id:
@@ -221,6 +304,8 @@ def generate_recipe_image(
                     task_url,
                     {"Authorization": f"Bearer {settings.LLM_API_KEY}"},
                     None,
+                    timeout=30,
+                    attempts=2,
                 )
                 consecutive_network_errors = 0
             except DashScopeImageError as exc:

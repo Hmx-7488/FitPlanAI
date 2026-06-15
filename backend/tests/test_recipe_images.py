@@ -1,7 +1,10 @@
 import asyncio
+import json
+import ssl
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.error import URLError
 from unittest.mock import patch
 
 from sqlalchemy import select
@@ -12,6 +15,7 @@ from app.models.user import RecipeImageJob
 from app.schemas.vision import RecipeImage, RecipeItem
 from app.services.image_generation_service import (
     DashScopeImageError,
+    _request_json,
     _result_image_url,
     _wan26_payload,
     generate_recipe_image,
@@ -43,6 +47,53 @@ def sample_recipe(prompt: str = "鸡胸肉西兰花轻食成品") -> RecipeItem:
 
 
 class ImageProtocolTests(unittest.TestCase):
+    @patch("app.services.image_generation_service.time.sleep")
+    @patch("app.services.image_generation_service.urlopen")
+    def test_request_json_retries_transient_ssl_eof(self, urlopen, _sleep):
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(
+            {"output": {"task_id": "task-1"}}
+        ).encode("utf-8")
+        urlopen.side_effect = [
+            URLError(ssl.SSLEOFError(8, "unexpected eof")),
+            response,
+        ]
+
+        result = _request_json(
+            "https://dashscope.aliyuncs.com/api/v1/test",
+            {},
+            {"model": "wan2.6-t2i"},
+            attempts=3,
+        )
+
+        self.assertEqual(result["output"]["task_id"], "task-1")
+        self.assertEqual(urlopen.call_count, 2)
+
+    @patch(
+        "app.services.image_generation_service._uses_mihomo_fake_ip",
+        return_value=True,
+    )
+    @patch("app.services.image_generation_service.time.sleep")
+    @patch("app.services.image_generation_service.urlopen")
+    def test_request_json_reports_proxy_hint_after_retries(
+        self,
+        urlopen,
+        _sleep,
+        _fake_ip,
+    ):
+        urlopen.side_effect = URLError(ssl.SSLEOFError(8, "unexpected eof"))
+
+        with self.assertRaises(DashScopeImageError) as raised:
+            _request_json(
+                "https://dashscope.aliyuncs.com/api/v1/test",
+                {},
+                attempts=2,
+            )
+
+        self.assertEqual(raised.exception.code, "NETWORK_ERROR")
+        self.assertIn("Mihomo", str(raised.exception))
+        self.assertEqual(urlopen.call_count, 2)
+
     def test_wan26_payload_uses_new_message_protocol(self):
         payload = _wan26_payload("一份轻食", "wan2.6-t2i")
 
