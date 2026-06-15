@@ -176,23 +176,85 @@ export interface RecipeResponse {
 // 身材照片分析
 export interface BodyPhotoAnalysis {
   analysis_id: string
+  status: 'completed' | 'rejected' | 'fallback'
+  created_at?: string
   photo_url?: string
   photo_urls?: Record<string, string>
+  measurements?: BodyMeasurements
   quality_check: {
     is_usable: boolean
-    lighting: string
-    pose: string
-    visible_body_regions?: string[]
+    usable_views: string[]
+    views: Record<string, BodyViewQuality>
+    rejection_reasons: string[]
+    retake_guidance: string[]
   }
   body_fat_estimate: {
+    value?: number | null
     estimated_range: string
     confidence: number
     note?: string
+    sources?: BodyEstimateSource[]
   }
+  tracking_metrics?: Record<string, number>
   training_focus: string[]
   nutrition_suggestion: string
+  limitations?: string[]
+  comparison?: BodyComparison | null
   auto_filled?: boolean
   is_ai_analysis?: boolean
+}
+
+export interface BodyMeasurements {
+  waist_cm?: number
+  hip_cm?: number
+  chest_cm?: number
+  neck_cm?: number
+  body_fat_scale_pct?: number
+  measured_weight_kg?: number
+}
+
+export interface BodyViewQuality {
+  usable: boolean
+  correct_view: boolean
+  full_body_visible: boolean
+  torso_visible: boolean
+  lighting: string
+  clothing: string
+  occlusion: string
+  camera_level: string
+  issues: string[]
+}
+
+export interface BodyEstimateSource {
+  key: string
+  label: string
+  value: number
+  weight: number
+}
+
+export interface BodyComparison {
+  is_comparable: boolean
+  confidence?: number
+  comparable_views: string[]
+  summary: string
+  changes?: string[]
+  limitations?: string[]
+  previous_analysis_id?: string
+  previous_created_at?: string
+  measurement_changes?: Record<string, number>
+}
+
+export interface BodyAnalysisHistoryItem {
+  analysis_id: string
+  status: BodyPhotoAnalysis['status']
+  created_at: string
+  photo_urls: Record<string, string>
+  measurements: BodyMeasurements
+  quality_check: BodyPhotoAnalysis['quality_check']
+  body_fat_estimate: BodyPhotoAnalysis['body_fat_estimate'] | null
+  comparison?: BodyComparison | null
+  confidence: number
+  is_ai_analysis: boolean
 }
 
 // AI 动作分析

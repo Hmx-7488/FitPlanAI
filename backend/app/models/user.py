@@ -124,6 +124,23 @@ class MealLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class BodyAnalysis(Base):
+    """Persisted body-composition analysis and comparison context."""
+    __tablename__ = "body_analyses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="completed", index=True)
+    photo_urls_json: Mapped[str] = mapped_column(Text, default="{}")
+    view_metadata_json: Mapped[str] = mapped_column(Text, default="{}")
+    measurements_json: Mapped[str] = mapped_column(Text, default="{}")
+    quality_json: Mapped[str] = mapped_column(Text, default="{}")
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    confidence: Mapped[float] = mapped_column(Float, default=0)
+    is_ai: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
 class ChatConversation(Base):
     """聊天 Agent 会话。"""
     __tablename__ = "chat_conversations"

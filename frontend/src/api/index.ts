@@ -15,6 +15,9 @@ import type {
   MealDailySummary,
   ChatConversation,
   ChatConversationDetail,
+  BodyPhotoAnalysis,
+  BodyMeasurements,
+  BodyAnalysisHistoryItem,
 } from '../types'
 
 const api = axios.create({
@@ -205,7 +208,11 @@ export async function getDashboard(userId: number): Promise<DashboardData> {
 }
 
 // 身材照片分析
-export async function analyzeBodyPhoto(userId: number, imageFile: File | { front?: File | null; side?: File | null; back?: File | null }) {
+export async function analyzeBodyPhoto(
+  userId: number,
+  imageFile: File | { front?: File | null; side?: File | null; back?: File | null },
+  measurements: BodyMeasurements = {},
+): Promise<BodyPhotoAnalysis> {
   const formData = new FormData()
   formData.append('user_id', String(userId))
   if (imageFile instanceof File) {
@@ -215,10 +222,23 @@ export async function analyzeBodyPhoto(userId: number, imageFile: File | { front
     if (imageFile.side) formData.append('side_image', imageFile.side)
     if (imageFile.back) formData.append('back_image', imageFile.back)
   }
-  const res = await api.post('/body/analyze', formData, {
+  Object.entries(measurements).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') {
+      formData.append(key, String(value))
+    }
+  })
+  const res = await api.post<BodyPhotoAnalysis>('/body/analyze', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: 180000,
   })
+  return res.data
+}
+
+export async function getBodyAnalysisHistory(
+  userId: number,
+  limit: number = 10,
+): Promise<BodyAnalysisHistoryItem[]> {
+  const res = await api.get<BodyAnalysisHistoryItem[]>(`/body/history/${userId}?limit=${limit}`)
   return res.data
 }
 

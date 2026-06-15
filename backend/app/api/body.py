@@ -1,14 +1,27 @@
-"""身材照片分析 API（Vision Model 驱动，自动回填体脂率）"""
+"""Body-photo analysis with quality gates, measurement fusion and history."""
+from __future__ import annotations
+
 import json
 import logging
 import uuid
 from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
+from typing import Any
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.database import get_db
-from app.models.user import User
-from app.services.profile_service import update_profile
+from app.models.user import BodyAnalysis, User
+from app.services.body_analysis_service import (
+    assess_photo_quality,
+    fuse_body_fat_estimate,
+    navy_body_fat,
+    select_comparable_views,
+    validate_measurements,
+)
 from app.services.image_utils import image_extension, validate_image
+from app.services.profile_service import update_profile
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -18,60 +31,54 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 VIEW_LABELS = {
-    "front": "front view",
-    "side": "side view",
-    "back": "back view",
+    "front": "正面",
+    "side": "侧面",
+    "back": "背面",
 }
 
 
-def _bmi_fallback(user) -> dict:
-    """BMI 粗略估算降级方案"""
-    weight = user.weight or 70
-    height_m = (user.height or 170) / 100
-    bmi = weight / (height_m * height_m) if height_m > 0 else 22
-    if bmi < 18.5:
-        body_fat_estimate, body_fat_range = 12.0, "10%-15%"
-    elif bmi < 24:
-        body_fat_estimate, body_fat_range = 21.0, "18%-24%"
-    elif bmi < 28:
-        body_fat_estimate, body_fat_range = 27.0, "25%-30%"
-    else:
-        body_fat_estimate, body_fat_range = 32.0, "30%-35%"
-
-    goal_type = user.goal_type or "fat_loss"
-    if goal_type == "muscle_gain":
-        training_focus = ["背部训练", "胸部训练", "腿部力量"]
-        nutrition_suggestion = "保持轻度热量盈余，优先保证蛋白质摄入和训练日碳水。"
-    else:
-        training_focus = ["核心训练", "有氧训练", "全身力量"]
-        nutrition_suggestion = "保持中等热量缺口，优先保证蛋白质摄入，控制油脂和精制糖。"
-
-    return {
-        "body_fat_estimate": body_fat_estimate,
-        "body_fat_range": body_fat_range,
-        "confidence": 0.55,
-        "training_focus": training_focus,
-        "nutrition_suggestion": nutrition_suggestion,
-        "shape_notes": f"基于 BMI {bmi:.1f} 粗略估算",
-        "is_ai": False,
-    }
+def _json_load(raw: str | None, fallback: Any) -> Any:
+    try:
+        value = json.loads(raw or "")
+        return value
+    except (TypeError, json.JSONDecodeError):
+        return fallback
 
 
 def _extract_json_object(raw: str) -> dict:
     text = raw.strip()
-    if "```" in text:
-        json_start = text.find("{")
-        json_end = text.rfind("}") + 1
-        text = text[json_start:json_end]
-    else:
-        json_start = text.find("{")
-        json_end = text.rfind("}") + 1
-        if json_start >= 0 and json_end > json_start:
-            text = text[json_start:json_end]
-    data = json.loads(text)
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start < 0 or end <= start:
+        raise ValueError("Body analysis response does not contain a JSON object")
+    data = json.loads(text[start:end])
     if not isinstance(data, dict):
         raise ValueError("Body analysis response must be a JSON object")
     return data
+
+
+def _bmi_fallback(user) -> dict:
+    """Compatibility fallback used only when the provider is unavailable."""
+    weight = user.weight or 70
+    height_m = (user.height or 170) / 100
+    bmi = weight / (height_m * height_m) if height_m > 0 else 22
+    if bmi < 18.5:
+        estimate, range_text = 12.0, "10%-15%"
+    elif bmi < 24:
+        estimate, range_text = 21.0, "18%-24%"
+    elif bmi < 28:
+        estimate, range_text = 27.0, "25%-30%"
+    else:
+        estimate, range_text = 32.0, "30%-35%"
+    return {
+        "body_fat_estimate": estimate,
+        "body_fat_range": range_text,
+        "confidence": 0.35,
+        "shape_notes": f"视觉服务不可用，当前仅基于 BMI {bmi:.1f} 给出低置信度参考",
+        "training_focus": ["全身力量训练", "低强度有氧", "核心稳定"],
+        "nutrition_suggestion": "先记录体重和腰围趋势，避免仅凭本次估算调整饮食。",
+        "is_ai": False,
+    }
 
 
 def _coerce_body_fat_range(low, high, user) -> tuple[float, float]:
@@ -82,66 +89,52 @@ def _coerce_body_fat_range(low, high, user) -> tuple[float, float]:
         fallback = _bmi_fallback(user)
         estimate = fallback["body_fat_estimate"]
         return estimate - 3, estimate + 3
-
     if low > high:
         low, high = high, low
     if high - low < 3:
-        mid = (low + high) / 2
-        low, high = mid - 1.5, mid + 1.5
+        midpoint = (low + high) / 2
+        low, high = midpoint - 1.5, midpoint + 1.5
     if high - low > 12:
-        mid = (low + high) / 2
-        low, high = mid - 6, mid + 6
-
-    gender_min, gender_max = (5, 45) if user.gender == "male" else (12, 52)
-    low = max(gender_min, min(low, gender_max))
-    high = max(gender_min, min(high, gender_max))
+        midpoint = (low + high) / 2
+        low, high = midpoint - 6, midpoint + 6
+    minimum, maximum = (5, 45) if user.gender == "male" else (12, 52)
+    low = max(minimum, min(low, maximum))
+    high = max(minimum, min(high, maximum))
     if high <= low:
-        high = min(gender_max, low + 3)
+        high = min(maximum, low + 3)
     return round(low, 1), round(high, 1)
 
 
-def _adjust_confidence(parsed: dict, low: float, high: float) -> float:
+def _model_confidence(parsed: dict, low: float, high: float) -> float:
     try:
-        confidence = float(parsed.get("confidence", 0.65))
+        confidence = float(parsed.get("confidence", 0.6))
     except (TypeError, ValueError):
-        confidence = 0.65
-    lighting = str(parsed.get("lighting", "unknown")).lower()
-    pose_quality = str(parsed.get("pose_quality", "unknown")).lower()
-    usable = bool(parsed.get("is_usable", True))
-
-    if not usable:
-        confidence = min(confidence, 0.35)
-    if lighting in {"poor", "bad", "dark"}:
-        confidence -= 0.15
-    if pose_quality in {"poor", "partial", "covered", "bad"}:
-        confidence -= 0.18
+        confidence = 0.6
     if high - low > 8:
         confidence -= 0.08
-    return round(max(0.2, min(confidence, 0.9)), 2)
+    return round(max(0.15, min(confidence, 0.9)), 2)
 
 
 async def _save_body_image(upload: UploadFile, view: str, user_id: int) -> dict:
     content = await upload.read()
     if len(content) > MAX_IMAGE_BYTES:
-        raise HTTPException(status_code=400, detail="Image must be smaller than 10MB")
+        raise HTTPException(status_code=400, detail="图片必须小于 10MB")
     try:
         mime_type, width, height = validate_image(content)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     saved_name = f"{uuid.uuid4().hex}_{view}{image_extension(mime_type, upload.filename)}"
     saved_path = UPLOAD_DIR / saved_name
+    saved_path.write_bytes(content)
     logger.info(
-        "Body photo upload received: user_id=%s view=%s filename=%r content_type=%r detected_mime=%s size_bytes=%s width=%s height=%s",
+        "Body photo saved: user_id=%s view=%s mime=%s bytes=%s dimensions=%sx%s",
         user_id,
         view,
-        upload.filename,
-        upload.content_type,
         mime_type,
         len(content),
         width,
         height,
     )
-    saved_path.write_bytes(content)
     return {
         "view": view,
         "filename": saved_name,
@@ -150,6 +143,190 @@ async def _save_body_image(upload: UploadFile, view: str, user_id: int) -> dict:
         "mime_type": mime_type,
         "width": width,
         "height": height,
+        "aspect_ratio": round(width / height, 4),
+    }
+
+
+def _build_analysis_prompt(user: User, saved_images: list[dict], measurements: dict[str, float]) -> str:
+    height_m = (user.height or 170) / 100
+    weight = measurements.get("measured_weight_kg", user.weight or 70)
+    bmi = weight / (height_m * height_m) if height_m > 0 else 22
+    measurement_text = json.dumps(measurements, ensure_ascii=False) if measurements else "未提供"
+    views = "、".join(VIEW_LABELS[item["view"]] for item in saved_images)
+    return f"""
+你是一名严谨的健身体态和身体成分评估助手。任务是进行非医疗性质的区间估算。
+
+用户资料：年龄={user.age}，性别={user.gender}，身高={user.height}cm，体重={weight}kg，BMI={bmi:.1f}。
+用户手工测量：{measurement_text}。这些数字只能作为用户提供的数据使用，禁止从照片虚构围度。
+上传视角：{views}。
+
+必须先逐张检查质量。以下任一情况应将对应视角 usable 设为 false：
+- 不是声明的正面/侧面/背面，躯干不完整，人物过小或严重裁切；
+- 逆光、过暗、过曝、明显滤镜或镜面广角畸变；
+- 宽松衣物遮挡轮廓、重度遮挡、刻意收腹或夸张摆姿；
+- 无法确认是同一位成年人，或图片内容不适合身材分析。
+
+分析约束：
+1. 体脂只能输出区间，单视角或质量一般时扩大区间并降低置信度。
+2. 不得诊断脊柱侧弯、骨盆前倾等疾病，只能描述可见姿态倾向并注明局限。
+3. 如果没有任何可用视角，is_usable=false，不得为了完成任务而猜测体脂。
+4. training_focus 给出 2-4 个可执行训练重点，nutrition 给出一句可执行建议。
+5. 面向用户的文字必须使用简体中文。
+
+只返回严格 JSON：
+{{
+  "is_usable": true,
+  "body_fat_low": 18,
+  "body_fat_high": 24,
+  "confidence": 0.72,
+  "shape_notes": "仅描述照片中可见轮廓和体态倾向",
+  "visible_body_regions": ["正面躯干"],
+  "training_focus": ["核心稳定", "下肢复合训练"],
+  "nutrition": "建议内容",
+  "limitations": ["照片估算不能替代专业测量"],
+  "view_quality": {{
+    "front": {{
+      "usable": true,
+      "correct_view": true,
+      "full_body_visible": true,
+      "torso_visible": true,
+      "lighting": "good",
+      "clothing": "fitted",
+      "occlusion": "none",
+      "camera_level": "waist",
+      "issues": []
+    }}
+  }}
+}}
+""".strip()
+
+
+async def _latest_completed(db: AsyncSession, user_id: int) -> BodyAnalysis | None:
+    query = (
+        select(BodyAnalysis)
+        .where(BodyAnalysis.user_id == user_id, BodyAnalysis.status == "completed")
+        .order_by(BodyAnalysis.created_at.desc())
+        .limit(1)
+    )
+    return (await db.execute(query)).scalar_one_or_none()
+
+
+def _load_previous_images(previous: BodyAnalysis, views: list[str]) -> list[dict]:
+    photo_urls = _json_load(previous.photo_urls_json, {})
+    loaded: list[dict] = []
+    for view in views:
+        url = str(photo_urls.get(view, ""))
+        filename = Path(url).name
+        path = UPLOAD_DIR / filename
+        if not filename or not path.is_file() or path.parent != UPLOAD_DIR:
+            continue
+        content = path.read_bytes()
+        try:
+            mime_type, width, height = validate_image(content)
+        except ValueError:
+            continue
+        loaded.append({
+            "view": view,
+            "content": content,
+            "mime_type": mime_type,
+            "width": width,
+            "height": height,
+        })
+    return loaded
+
+
+def _run_comparison(
+    llm,
+    current_images: list[dict],
+    previous: BodyAnalysis,
+    comparable_views: list[str],
+    current_measurements: dict[str, float],
+) -> dict:
+    from app.services.vision_service import encode_image
+    from langchain_core.messages import HumanMessage
+
+    previous_images = _load_previous_images(previous, comparable_views)
+    previous_measurements = _json_load(previous.measurements_json, {})
+    available = [item["view"] for item in previous_images]
+    if not available:
+        return {
+            "is_comparable": False,
+            "comparable_views": [],
+            "summary": "历史照片文件不可用，无法进行阶段对比。",
+            "limitations": ["请保留相同角度和拍摄条件重新建立基线"],
+        }
+    prompt = f"""
+比较同一用户两个阶段的身材照片，只比较这些同角度视图：{available}。
+上次测量={json.dumps(previous_measurements, ensure_ascii=False)}；
+本次测量={json.dumps(current_measurements, ensure_ascii=False)}。
+
+要求：
+1. 先判断光线、距离、镜头高度、衣物和姿态是否足够接近。
+2. 只能描述可见轮廓变化，不得把光线、收腹或姿态差异解释为减脂。
+3. 不得从照片推断精确减脂公斤数或医学结论。
+4. 不可比时 is_comparable=false，并说明原因。
+5. 只返回严格 JSON，文字使用简体中文。
+
+结构：
+{{"is_comparable":true,"confidence":0.7,"comparable_views":["front"],"summary":"阶段变化摘要",
+"changes":["腰腹轮廓变化较小"],"limitations":["拍摄光线存在轻微差异"]}}
+""".strip()
+    content: list[dict] = [{"type": "text", "text": prompt}]
+    current_by_view = {item["view"]: item for item in current_images}
+    for view in available:
+        previous_item = next(item for item in previous_images if item["view"] == view)
+        current_item = current_by_view.get(view)
+        if not current_item:
+            continue
+        content.extend([
+            {"type": "text", "text": f"上次{VIEW_LABELS[view]}："},
+            {"type": "image_url", "image_url": {
+                "url": encode_image(previous_item["content"], previous_item["mime_type"]),
+                "detail": "high",
+            }},
+            {"type": "text", "text": f"本次{VIEW_LABELS[view]}："},
+            {"type": "image_url", "image_url": {
+                "url": encode_image(current_item["content"], current_item["mime_type"]),
+                "detail": "high",
+            }},
+        ])
+    parsed = _extract_json_object(llm.invoke([HumanMessage(content=content)]).content)
+    return {
+        "is_comparable": bool(parsed.get("is_comparable", False)),
+        "confidence": round(max(0, min(float(parsed.get("confidence", 0)), 0.9)), 2),
+        "comparable_views": [view for view in parsed.get("comparable_views", []) if view in available],
+        "summary": str(parsed.get("summary", "")),
+        "changes": [str(item) for item in parsed.get("changes", [])[:5]],
+        "limitations": [str(item) for item in parsed.get("limitations", [])[:4]],
+        "previous_analysis_id": f"body_{previous.id}",
+        "previous_created_at": previous.created_at.isoformat(),
+    }
+
+
+def _measurement_changes(current: dict[str, float], previous: BodyAnalysis | None) -> dict[str, float]:
+    if not previous:
+        return {}
+    old = _json_load(previous.measurements_json, {})
+    changes: dict[str, float] = {}
+    for key, value in current.items():
+        if key in old:
+            changes[key] = round(value - float(old[key]), 1)
+    return changes
+
+
+def _history_item(record: BodyAnalysis) -> dict:
+    result = _json_load(record.result_json, {})
+    return {
+        "analysis_id": f"body_{record.id}",
+        "status": record.status,
+        "created_at": record.created_at.isoformat(),
+        "photo_urls": _json_load(record.photo_urls_json, {}),
+        "measurements": _json_load(record.measurements_json, {}),
+        "quality_check": _json_load(record.quality_json, {}),
+        "body_fat_estimate": result.get("body_fat_estimate"),
+        "comparison": result.get("comparison"),
+        "confidence": record.confidence,
+        "is_ai_analysis": bool(record.is_ai),
     }
 
 
@@ -160,140 +337,259 @@ async def analyze_body_photo(
     front_image: UploadFile | None = File(None),
     side_image: UploadFile | None = File(None),
     back_image: UploadFile | None = File(None),
+    waist_cm: float | None = Form(None),
+    hip_cm: float | None = Form(None),
+    chest_cm: float | None = Form(None),
+    neck_cm: float | None = Form(None),
+    body_fat_scale_pct: float | None = Form(None),
+    measured_weight_kg: float | None = Form(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """上传身材照片，Vision Model 分析体脂率并自动回填档案"""
     user = await db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
+    try:
+        measurements = validate_measurements({
+            "waist_cm": waist_cm,
+            "hip_cm": hip_cm,
+            "chest_cm": chest_cm,
+            "neck_cm": neck_cm,
+            "body_fat_scale_pct": body_fat_scale_pct,
+            "measured_weight_kg": measured_weight_kg,
+        })
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    uploads: list[tuple[str, UploadFile]] = []
-    if front_image:
-        uploads.append(("front", front_image))
-    if side_image:
-        uploads.append(("side", side_image))
-    if back_image:
-        uploads.append(("back", back_image))
+    uploads = [
+        (view, upload)
+        for view, upload in (
+            ("front", front_image),
+            ("side", side_image),
+            ("back", back_image),
+        )
+        if upload
+    ]
     if image and not uploads:
         uploads.append(("front", image))
     if not uploads:
-        raise HTTPException(status_code=400, detail="At least one body photo is required")
+        raise HTTPException(status_code=400, detail="至少上传一张身材照片")
+    saved_images = [await _save_body_image(upload, view, user_id) for view, upload in uploads[:3]]
+    previous = await _latest_completed(db, user_id)
 
-    saved_images = []
-    for view, upload in uploads[:3]:
-        saved_images.append(await _save_body_image(upload, view, user_id))
+    photo_urls = {item["view"]: f"/uploads/body/{item['filename']}" for item in saved_images}
+    view_metadata = {
+        item["view"]: {
+            "width": item["width"],
+            "height": item["height"],
+            "aspect_ratio": item["aspect_ratio"],
+        }
+        for item in saved_images
+    }
 
-    primary_image = saved_images[0]
-    # 尝试 Vision Model 分析
-    result = None
+    result: dict[str, Any]
+    quality: dict[str, Any]
+    status = "completed"
+    is_ai = True
+    llm = None
     try:
-        from app.services.vision_service import get_vision_llm, encode_image
+        from app.services.vision_service import encode_image, get_vision_llm
         from langchain_core.messages import HumanMessage
 
-        llm = get_vision_llm(max_tokens=900)
-
-        gender_label = "male" if user.gender == "male" else "female"
-        height_m = (user.height or 170) / 100
-        bmi = (user.weight or 70) / (height_m * height_m) if height_m > 0 else 22
-        uploaded_views = ", ".join(VIEW_LABELS.get(item["view"], item["view"]) for item in saved_images)
-        prompt = (
-            "你是一名严谨的健身体态与身体成分评估师。只能依据照片中可见信息估算体脂，不得给出医学诊断。\n"
-            f"用户数据：年龄={user.age}，性别={gender_label}，身高={user.height}cm，体重={user.weight}kg，BMI={bmi:.1f}。\n"
-            f"已上传视角：{uploaded_views}。必须综合使用全部照片：正面观察腰围和四肢，侧面观察腹部和体态，背面观察背部脂肪及肩臀轮廓。\n"
-            "先判断每个视角的图像质量，包括全身或躯干是否完整、衣物是否宽松、光线、拍摄角度和遮挡。\n"
-            "估算规则：\n"
-            "1. 综合 BMI、性别、腰腹脂肪、四肢线条、肩背胸臀腿肌肉基础。\n"
-            "2. 只有单视角、衣物宽松、角度不标准或光线差时，扩大估算区间并降低置信度。\n"
-            "3. 正常区间至少相差3个百分点；不确定时使用6-10个百分点，多张清晰照片可适当缩小但不得过度精确。\n"
-            "4. training_focus 提供2-4个具体训练重点，nutrition 提供一句可执行营养建议。\n"
-            "5. 所有面向用户的文本值必须使用简体中文。\n"
-            "只返回严格 JSON，不要 Markdown 或额外文字。结构：\n"
-            '{"is_usable":true,"body_fat_low":18,"body_fat_high":23,"confidence":0.78,'
-            '"shape_notes":"正面和侧面可见轻度腰腹脂肪，背面肩部线条中等",'
-            '"visible_body_regions":["正面躯干","侧面躯干","背部"],"fat_distribution":"腰腹为主",'
-            '"muscle_base":"中等","training_focus":["核心抗伸展","背部力量","下肢复合训练"],'
-            '"nutrition":"保持适度热量缺口，蛋白质按目标体重每公斤1.6-2.0克摄入。",'
-            '"lighting":"good","pose_quality":"standard","limitations":["照片估算存在误差，建议结合腰围和体重趋势"]}'
-        )
-
-        message_content = [{"type": "text", "text": prompt}]
+        llm = get_vision_llm(max_tokens=1400)
+        content: list[dict] = [{"type": "text", "text": _build_analysis_prompt(user, saved_images, measurements)}]
         for item in saved_images:
-            message_content.append({"type": "text", "text": f"{VIEW_LABELS.get(item["view"], item["view"])}:"})
-            message_content.append({
-                "type": "image_url",
-                "image_url": {"url": encode_image(item["content"], mime_type=item["mime_type"]), "detail": "high"},
-            })
-        message = HumanMessage(content=message_content)
-
-        response = llm.invoke([message])
-        raw = response.content.strip()
-        logger.info("Vision Model raw body analysis response: %s", raw)
-
+            content.extend([
+                {"type": "text", "text": f"{VIEW_LABELS[item['view']]}照片："},
+                {"type": "image_url", "image_url": {
+                    "url": encode_image(item["content"], item["mime_type"]),
+                    "detail": "high",
+                }},
+            ])
+        raw = llm.invoke([HumanMessage(content=content)]).content
+        logger.info(
+            "Body analysis response received: user_id=%s response_chars=%s",
+            user_id,
+            len(raw),
+        )
         parsed = _extract_json_object(raw)
         low, high = _coerce_body_fat_range(parsed.get("body_fat_low"), parsed.get("body_fat_high"), user)
-        body_fat_estimate = round((low + high) / 2, 1)
-        confidence = _adjust_confidence(parsed, low, high)
-
-        training_focus = parsed.get("training_focus", ["core training", "cardio training"])
-        if not isinstance(training_focus, list):
-            training_focus = ["core training", "cardio training"]
-
-        result = {
-            "body_fat_estimate": body_fat_estimate,
-            "body_fat_range": f"{low}%-{high}%",
-            "confidence": confidence,
-            "training_focus": [str(item) for item in training_focus[:4]],
-            "nutrition_suggestion": parsed.get("nutrition", "保持适度热量缺口并优先保证蛋白质摄入。"),
-            "shape_notes": parsed.get("shape_notes", ""),
-            "lighting": parsed.get("lighting", "unknown"),
-            "pose_quality": parsed.get("pose_quality", "unknown"),
-            "is_usable": bool(parsed.get("is_usable", True)),
-            "visible_body_regions": parsed.get("visible_body_regions", []),
-            "limitations": parsed.get("limitations", []),
-            "is_ai": True,
-        }
+        confidence = _model_confidence(parsed, low, high)
+        quality = assess_photo_quality(parsed, [item["view"] for item in saved_images], confidence)
+        if not quality["is_usable"]:
+            status = "rejected"
+            result = {
+                "body_fat_estimate": None,
+                "training_focus": [],
+                "nutrition_suggestion": "",
+                "shape_notes": "",
+                "limitations": [str(item) for item in parsed.get("limitations", [])[:4]],
+                "confidence": min(confidence, 0.39),
+            }
+        else:
+            fused = fuse_body_fat_estimate(
+                gender=user.gender,
+                height_cm=user.height,
+                vision_low=low,
+                vision_high=high,
+                vision_confidence=confidence,
+                measurements=measurements,
+                usable_view_count=len(quality["usable_views"]),
+            )
+            result = {
+                **fused,
+                "body_fat_estimate": {
+                    "value": fused["body_fat_estimate"],
+                    "estimated_range": fused["body_fat_range"],
+                    "confidence": fused["confidence"],
+                    "note": str(parsed.get("shape_notes", "")),
+                    "sources": fused["estimate_sources"],
+                },
+                "training_focus": [str(item) for item in parsed.get("training_focus", [])[:4]],
+                "nutrition_suggestion": str(parsed.get("nutrition", "")),
+                "shape_notes": str(parsed.get("shape_notes", "")),
+                "limitations": [str(item) for item in parsed.get("limitations", [])[:4]],
+                "confidence": fused["confidence"],
+            }
     except Exception:
         logger.exception(
-            "Vision Model body analysis failed; falling back to BMI. user_id=%s views=%s",
+            "Vision body analysis failed: user_id=%s views=%s",
             user_id,
             [item["view"] for item in saved_images],
         )
+        status = "fallback"
+        is_ai = False
+        fallback = _bmi_fallback(user)
+        navy = navy_body_fat(
+            user.gender,
+            user.height,
+            measurements.get("waist_cm"),
+            measurements.get("hip_cm"),
+            measurements.get("neck_cm"),
+        )
+        if navy is not None:
+            lower_bound, upper_bound = (5, 45) if user.gender == "male" else (12, 52)
+            fallback["body_fat_estimate"] = navy
+            fallback["body_fat_range"] = (
+                f"{max(lower_bound, navy - 3):.1f}%-{min(upper_bound, navy + 3):.1f}%"
+            )
+            fallback["confidence"] = 0.5
+            fallback["shape_notes"] = "视觉服务不可用，当前为围度公式的非视觉参考值"
+        quality = {
+            "is_usable": False,
+            "usable_views": [],
+            "views": {},
+            "rejection_reasons": ["视觉分析服务暂时不可用，未完成照片质量判定"],
+            "retake_guidance": [],
+        }
+        result = {
+            **fallback,
+            "body_fat_estimate": {
+                "value": fallback["body_fat_estimate"],
+                "estimated_range": fallback["body_fat_range"],
+                "confidence": fallback["confidence"],
+                "note": fallback["shape_notes"],
+                "sources": [],
+            },
+            "tracking_metrics": {},
+        }
 
-    # 降级到 BMI 估算
-    if result is None:
-        result = _bmi_fallback(user)
+    comparison = None
+    if status == "completed" and previous and llm:
+        previous_metadata = _json_load(previous.view_metadata_json, {})
+        previous_quality = _json_load(previous.quality_json, {})
+        comparable = select_comparable_views(
+            view_metadata,
+            previous_metadata,
+            quality,
+            previous_quality,
+        )
+        if comparable:
+            try:
+                comparison = _run_comparison(llm, saved_images, previous, comparable, measurements)
+            except Exception:
+                logger.exception("Body history comparison failed: user_id=%s", user_id)
+                comparison = {
+                    "is_comparable": False,
+                    "comparable_views": comparable,
+                    "summary": "阶段照片对比服务暂时不可用。",
+                    "limitations": ["本次基础分析已保留，可稍后重新分析"],
+                }
+        else:
+            comparison = {
+                "is_comparable": False,
+                "comparable_views": [],
+                "summary": "本次与上次没有满足同角度、相近画幅和合格质量的照片。",
+                "limitations": ["下次请固定机位高度、距离、光线和衣物"],
+            }
+        comparison["measurement_changes"] = _measurement_changes(measurements, previous)
+        result["comparison"] = comparison
 
-    auto_fill = bool(result.get("body_fat_estimate") is not None and result.get("is_usable", True) and result.get("confidence", 0) >= 0.45)
+    record = BodyAnalysis(
+        user_id=user_id,
+        status=status,
+        photo_urls_json=json.dumps(photo_urls, ensure_ascii=False),
+        view_metadata_json=json.dumps(view_metadata, ensure_ascii=False),
+        measurements_json=json.dumps(measurements, ensure_ascii=False),
+        quality_json=json.dumps(quality, ensure_ascii=False),
+        result_json=json.dumps(result, ensure_ascii=False),
+        confidence=float(result.get("confidence", 0)),
+        is_ai=1 if is_ai else 0,
+    )
+    db.add(record)
+    await db.commit()
+    await db.refresh(record)
+
+    auto_fill = bool(
+        status == "completed"
+        and result.get("body_fat_estimate")
+        and result.get("confidence", 0) >= 0.65
+    )
     if auto_fill:
-        await update_profile(db, user_id, {"body_fat_rate": result["body_fat_estimate"]})
+        await update_profile(db, user_id, {
+            "body_fat_rate": result["body_fat_estimate"]["value"],
+        })
 
-    analysis_source = "AI 视觉估算" if result["is_ai"] else "BMI 降级估算"
-    limitations = result.get("limitations") or []
-    if isinstance(limitations, list) and limitations:
-        limitation_text = " 局限：" + "；".join(str(item) for item in limitations[:3])
-    else:
-        limitation_text = " 建议结合体脂秤、腰围和体重趋势综合判断。"
-
+    body_fat = result.get("body_fat_estimate")
+    if body_fat is None:
+        body_fat = {
+            "value": None,
+            "estimated_range": "",
+            "confidence": result.get("confidence", 0),
+            "note": "当前照片未通过质量校验，未生成体脂区间。",
+            "sources": [],
+        }
     return {
-        "analysis_id": f"body_{uuid.uuid4().hex[:8]}",
-        "photo_url": f"/uploads/body/{primary_image['filename']}",
-        "photo_urls": {
-            item["view"]: f"/uploads/body/{item['filename']}"
-            for item in saved_images
-        },
-        "quality_check": {
-            "is_usable": result.get("is_usable", True),
-            "lighting": result.get("lighting", "good"),
-            "pose": result.get("pose_quality", "standard"),
-            "visible_body_regions": result.get("visible_body_regions", []),
-        },
-        "body_fat_estimate": {
-            "estimated_range": result["body_fat_range"],
-            "confidence": result["confidence"],
-            "note": f"{analysis_source}：{result.get('shape_notes', '')}。{limitation_text}",
-        },
-        "training_focus": result["training_focus"],
-        "nutrition_suggestion": result["nutrition_suggestion"],
+        "analysis_id": f"body_{record.id}",
+        "status": status,
+        "created_at": record.created_at.isoformat(),
+        "photo_url": next(iter(photo_urls.values())),
+        "photo_urls": photo_urls,
+        "measurements": measurements,
+        "quality_check": quality,
+        "body_fat_estimate": body_fat,
+        "tracking_metrics": result.get("tracking_metrics", {}),
+        "training_focus": result.get("training_focus", []),
+        "nutrition_suggestion": result.get("nutrition_suggestion", ""),
+        "limitations": result.get("limitations", []),
+        "comparison": comparison,
         "auto_filled": auto_fill,
-        "is_ai_analysis": result["is_ai"],
+        "is_ai_analysis": is_ai,
     }
+
+
+@router.get("/history/{user_id}")
+async def get_body_analysis_history(
+    user_id: int,
+    limit: int = 10,
+    db: AsyncSession = Depends(get_db),
+):
+    if not await db.get(User, user_id):
+        raise HTTPException(status_code=404, detail="用户不存在")
+    query = (
+        select(BodyAnalysis)
+        .where(BodyAnalysis.user_id == user_id)
+        .order_by(BodyAnalysis.created_at.desc())
+        .limit(max(1, min(limit, 30)))
+    )
+    records = (await db.execute(query)).scalars().all()
+    return [_history_item(record) for record in records]
