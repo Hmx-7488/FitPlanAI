@@ -2,6 +2,7 @@
 
 import json
 import base64
+import logging
 import uuid
 import re
 from pathlib import Path
@@ -19,6 +20,7 @@ from app.services.image_utils import image_extension
 from app.services.recipe_image_service import prepare_recipe_image_jobs
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = Path(__file__).parent.parent.parent / "data" / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -157,6 +159,14 @@ async def recognize_ingredients(
             image_bytes, mime_type=mime_type, mode="ingredient", max_tokens=800,
         )
     except Exception:
+        logger.exception(
+            "Vision ingredient recognition failed; returning empty result. "
+            "user_id=%s mime_type=%s bytes=%s filename=%s",
+            user_id,
+            mime_type,
+            len(image_bytes),
+            filename,
+        )
         ingredients_data = []
 
     ingredients = [

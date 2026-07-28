@@ -3,6 +3,7 @@ import { ref, onMounted, nextTick, useTemplateRef } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { createCheckin } from '../api'
+import { localDateStr } from '../utils/date'
 import type { CheckinData } from '../types'
 import gsap from 'gsap'
 
@@ -21,7 +22,7 @@ onMounted(() => {
   })
 })
 
-const today = new Date().toISOString().split('T')[0]
+const today = localDateStr()
 
 const form = ref<CheckinData>({
   user_id: Number(localStorage.getItem('userId')) || 0,

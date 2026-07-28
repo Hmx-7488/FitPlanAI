@@ -4,13 +4,13 @@ import json
 import logging
 import uuid
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from pydantic import BaseModel
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from app.core.database import get_db
+from app.core.time import now_local, today_str
 from app.models.user import User, MealLog
 from app.services.image_utils import (
     SUPPORTED_IMAGE_MIME_TYPES,
@@ -32,8 +32,9 @@ _cache_lock = asyncio.Lock()
 
 
 MEAL_TYPES = ("breakfast", "lunch", "dinner", "snack")
-APP_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
+_RECOGNITION_FAILED_DETAIL = "餐食识别失败，请换个角度重新拍摄或稍后重试"
 
 
 def _detect_image_mime(image_bytes: bytes, filename: str | None, content_type: str | None) -> str:
@@ -43,7 +44,7 @@ def _detect_image_mime(image_bytes: bytes, filename: str | None, content_type: s
 
 
 def _today() -> str:
-    return datetime.now(APP_TIMEZONE).strftime("%Y-%m-%d")
+    return today_str()
 
 
 class IngredientItem(BaseModel):
@@ -87,21 +88,19 @@ async def analyze_meal(
     saved_path.write_bytes(content)
 
     # 调用 Vision Model 识别菜品（使用公共接口，统一 prompt）
+    # 失败时明确报错：不写入伪造数据污染用户的饮食记录
     try:
         items = await recognize_food_items(content, mime_type=mime_type, mode="dish")
+        if not items:
+            raise ValueError("Vision Model 未识别到任何菜品")
     except Exception:
-        logger.exception("Vision Model dish recognition failed; falling back to mock. user_id=%s", user_id)
-        items = [
-            {
-                "dish_name": "家常菜",
-                "estimated_portion_g": 200,
-                "calories_kcal": 350,
-                "protein_g": 20,
-                "carbs_g": 30,
-                "fat_g": 15,
-                "confidence": 0.5,
-            }
-        ]
+        logger.exception(
+            "Vision Model dish recognition failed. user_id=%s saved_path=%s",
+            user_id,
+            saved_path,
+        )
+        saved_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=502, detail=_RECOGNITION_FAILED_DETAIL)
 
     # 计算本餐总营养
     meal_total = {
@@ -254,10 +253,10 @@ async def recognize_meal(
         if not isinstance(ingredients, list):
             raise ValueError("Vision Model 返回格式错误")
 
-    except Exception as e:
-        # 记录错误并降级到 mock
+    except Exception:
+        # 识别失败：明确报错并清理已保存的图片，不向用户展示伪造结果
         logger.exception(
-            "Vision Model meal recognition failed; falling back to mock. "
+            "Vision Model meal recognition failed. "
             "user_id=%s filename=%r saved_path=%s size_bytes=%s mime=%s width=%s height=%s",
             user_id,
             image.filename,
@@ -267,14 +266,17 @@ async def recognize_meal(
             width,
             height,
         )
-        ingredients = [
-            {
-                "name": "unknown",
-                "display_name": "家常菜",
-                "estimated_weight_g": 200,
-                "confidence": 0.5,
-            }
-        ]
+        saved_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=502, detail=_RECOGNITION_FAILED_DETAIL)
+
+    if not ingredients:
+        logger.warning(
+            "Vision Model returned no meal ingredients: user_id=%s saved_path=%s",
+            user_id,
+            saved_path,
+        )
+        saved_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=502, detail="未能识别到食物，请重新拍摄")
 
     # 生成识别 ID 并缓存结果
     recognition_id = uuid.uuid4().hex
@@ -284,7 +286,7 @@ async def recognize_meal(
             "meal_type": meal_type,
             "image_path": str(saved_path),
             "ingredients": ingredients,
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": now_local().isoformat(),
         }
 
     return {
@@ -343,25 +345,15 @@ async def calculate_meal(
             raw = raw[json_start:json_end]
         nutrition = json.loads(raw)
     except Exception:
-        # 降级：简单估算
-        total_weight = sum(i.estimated_weight_g for i in request.ingredients)
-        nutrition = {
-            "calories_kcal": int(total_weight * 1.5),
-            "protein_g": round(total_weight * 0.15, 1),
-            "carbs_g": round(total_weight * 0.2, 1),
-            "fat_g": round(total_weight * 0.08, 1),
-            "items": [
-                {
-                    "dish_name": i.display_name,
-                    "calories_kcal": int(i.estimated_weight_g * 1.5),
-                    "protein_g": round(i.estimated_weight_g * 0.15, 1),
-                    "carbs_g": round(i.estimated_weight_g * 0.2, 1),
-                    "fat_g": round(i.estimated_weight_g * 0.08, 1),
-                    "estimated_portion_g": i.estimated_weight_g,
-                }
-                for i in request.ingredients
-            ],
-        }
+        # 营养计算失败：明确报错并保留识别缓存（允许用户直接重试计算），
+        # 不用拍脑袋的启发式数值冒充真实营养数据落库
+        logger.exception(
+            "Vision Model nutrition calculation failed. recognition_id=%s",
+            request.recognition_id,
+        )
+        async with _cache_lock:
+            recognition_cache[request.recognition_id] = cached
+        raise HTTPException(status_code=502, detail="营养计算失败，请点击重试")
 
     meal_total = {
         "calories_kcal": nutrition.get("calories_kcal", 0),

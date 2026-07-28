@@ -1,8 +1,20 @@
 import asyncio
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch, MagicMock
 
+from fastapi.testclient import TestClient
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from app.core.config import _configure_process_proxy, _proxy_url
+from app.core.database import Base, get_db
+from app.main import app
+from app.models.user import MealLog, User
 from app.api.body import _coerce_body_fat_range
+from app.api.dashboard import _compute_streak
 from app.services.vision_service import _extract_json_array
 from app.api.pose import _normalize_pose_result
 from app.schemas.vision import IngredientItem
@@ -13,6 +25,28 @@ from app.services.image_utils import (
     validate_image,
 )
 from app.services.vision_service import _build_recipe, _encode_image, _parse_recipes
+
+
+class ProcessProxyConfigTests(unittest.TestCase):
+    def test_proxy_url_adds_http_scheme(self):
+        self.assertEqual(_proxy_url("127.0.0.1:9674"), "http://127.0.0.1:9674")
+        self.assertEqual(_proxy_url("http://127.0.0.1:9674"), "http://127.0.0.1:9674")
+
+    def test_configure_process_proxy_uses_detected_proxy_when_env_is_empty(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with patch(
+                "app.core.config._windows_proxy_from_registry",
+                return_value={
+                    "HTTP_PROXY": "http://127.0.0.1:9674",
+                    "HTTPS_PROXY": "http://127.0.0.1:9674",
+                },
+            ):
+                _configure_process_proxy()
+
+            self.assertEqual(os.environ["HTTP_PROXY"], "http://127.0.0.1:9674")
+            self.assertEqual(os.environ["HTTPS_PROXY"], "http://127.0.0.1:9674")
+            self.assertEqual(os.environ["http_proxy"], "http://127.0.0.1:9674")
+            self.assertEqual(os.environ["https_proxy"], "http://127.0.0.1:9674")
 
 
 def png_header(width: int, height: int) -> bytes:
@@ -1044,6 +1078,143 @@ class VectorstoreMetadataTests(unittest.TestCase):
         # 检查是否有 chunk 携带 risk_tags
         has_risk = any(ch.risk_tags for ch, _ in results)
         self.assertTrue(has_risk, "Search results should include risk_tags from metadata")
+
+
+class CheckinStreakTests(unittest.TestCase):
+    """连续打卡天数：今天未打卡应从昨天起算，不清零。"""
+
+    def test_today_checked_counts_from_today(self):
+        dates = ["2026-07-28", "2026-07-27", "2026-07-26"]
+        self.assertEqual(_compute_streak(dates, "2026-07-28"), 3)
+
+    def test_today_not_checked_counts_from_yesterday(self):
+        dates = ["2026-07-27", "2026-07-26", "2026-07-25"]
+        self.assertEqual(_compute_streak(dates, "2026-07-28"), 3)
+
+    def test_gap_breaks_streak(self):
+        dates = ["2026-07-28", "2026-07-26", "2026-07-25"]
+        self.assertEqual(_compute_streak(dates, "2026-07-28"), 1)
+
+    def test_stale_checkin_returns_zero(self):
+        dates = ["2026-07-20", "2026-07-19"]
+        self.assertEqual(_compute_streak(dates, "2026-07-28"), 0)
+
+    def test_empty_returns_zero(self):
+        self.assertEqual(_compute_streak([], "2026-07-28"), 0)
+
+    def test_duplicate_dates_count_once(self):
+        dates = ["2026-07-28", "2026-07-28", "2026-07-27"]
+        self.assertEqual(_compute_streak(dates, "2026-07-28"), 2)
+
+
+class MealRecognitionFailureTests(unittest.TestCase):
+    """餐食识别/计算失败：明确 502 报错，不写入伪造数据。"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        db_path = Path(self.temp_dir.name) / "meal-test.db"
+        self.engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+        self.session_factory = async_sessionmaker(
+            self.engine, expire_on_commit=False
+        )
+
+        async def override_db():
+            async with self.session_factory() as session:
+                yield session
+
+        app.dependency_overrides[get_db] = override_db
+
+        async def prepare():
+            async with self.engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            async with self.session_factory() as session:
+                session.add(User(
+                    id=1, gender="male", age=30, height=175, weight=75,
+                    target_weight=70,
+                ))
+                await session.commit()
+
+        asyncio.run(prepare())
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        self.client.close()
+        app.dependency_overrides.clear()
+        asyncio.run(self.engine.dispose())
+        self.temp_dir.cleanup()
+
+    @staticmethod
+    def _png() -> bytes:
+        return png_header(32, 24)
+
+    def _meal_count(self) -> int:
+        async def count():
+            async with self.session_factory() as session:
+                result = await session.execute(select(func.count(MealLog.id)))
+                return result.scalar() or 0
+
+        return asyncio.run(count())
+
+    def test_analyze_failure_returns_502_and_persists_nothing(self):
+        with patch(
+            "app.api.meal.recognize_food_items",
+            new=AsyncMock(side_effect=RuntimeError("vision down")),
+        ):
+            response = self.client.post(
+                "/api/meal/analyze",
+                data={"user_id": "1", "meal_type": "lunch"},
+                files={"image": ("meal.png", self._png(), "image/png")},
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(self._meal_count(), 0)
+
+    def test_recognize_empty_result_returns_502(self):
+        with patch(
+            "app.api.meal.recognize_food_items",
+            new=AsyncMock(return_value=[]),
+        ):
+            response = self.client.post(
+                "/api/meal/recognize",
+                data={"user_id": "1", "meal_type": "lunch"},
+                files={"image": ("meal.png", self._png(), "image/png")},
+            )
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(self._meal_count(), 0)
+
+    def test_calculate_failure_returns_502_and_keeps_cache(self):
+        from app.api import meal as meal_module
+
+        meal_module.recognition_cache["rid-1"] = {
+            "user_id": 1,
+            "meal_type": "lunch",
+            "image_path": "",
+            "ingredients": [
+                {"name": "egg", "display_name": "鸡蛋", "estimated_weight_g": 100}
+            ],
+            "created_at": "2026-07-28T08:00:00",
+        }
+        payload = {
+            "recognition_id": "rid-1",
+            "ingredients": [
+                {"name": "egg", "display_name": "鸡蛋", "estimated_weight_g": 100}
+            ],
+            "meal_type": "lunch",
+        }
+        try:
+            with patch(
+                "app.api.meal.get_vision_llm",
+                side_effect=RuntimeError("llm down"),
+            ):
+                response = self.client.post("/api/meal/calculate", json=payload)
+
+            self.assertEqual(response.status_code, 502)
+            # 缓存保留，用户可直接重试计算
+            self.assertIn("rid-1", meal_module.recognition_cache)
+            self.assertEqual(self._meal_count(), 0)
+        finally:
+            meal_module.recognition_cache.pop("rid-1", None)
 
 
 if __name__ == "__main__":

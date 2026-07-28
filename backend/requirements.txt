@@ -12,3 +12,5 @@ chromadb
 pydantic
 pydantic-settings
 python-dotenv
+python-multipart
+certifi
