@@ -124,6 +124,22 @@ class MealLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class MealRecognition(Base):
+    """餐食识别暂存（识别 → 用户确认 → 计算营养 两步流程的中间态）。
+
+    持久化到数据库，避免内存缓存重启即丢、多实例不一致的问题。
+    计算成功后删除。
+    """
+    __tablename__ = "meal_recognitions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)  # uuid hex
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    meal_type: Mapped[str] = mapped_column(String(20), default="lunch")
+    image_path: Mapped[str] = mapped_column(Text, default="")
+    ingredients_json: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class BodyAnalysis(Base):
     """Persisted body-composition analysis and comparison context."""
     __tablename__ = "body_analyses"

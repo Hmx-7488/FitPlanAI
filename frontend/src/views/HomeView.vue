@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, nextTick, useTemplateRef } from 'vue'
 import { useRouter } from 'vue-router'
+import axios from 'axios'
 import { getDashboard, type DashboardData } from '../api'
 import { heroEntrance, dashboardEntrance, flowStepsEntrance, progressFillIn, countUp } from '../utils/animations'
 
@@ -8,6 +9,7 @@ const router = useRouter()
 const loading = ref(true)
 const data = ref<DashboardData | null>(null)
 const hasProfile = ref(false)
+const loadError = ref(false)
 const pageRef = useTemplateRef<HTMLElement>('pageRef')
 const consumedRef = useTemplateRef<HTMLElement>('consumedRef')
 const streakRef = useTemplateRef<HTMLElement>('streakRef')
@@ -42,7 +44,7 @@ const quickActions = [
   { icon: '&#128247;', title: '身材分析', desc: '照片估算体脂率', route: '/body-photo' },
 ]
 
-onMounted(async () => {
+async function loadDashboard() {
   const userId = localStorage.getItem('userId')
   if (!userId) {
     hasProfile.value = false
@@ -53,15 +55,25 @@ onMounted(async () => {
     if (pageRef.value) flowStepsEntrance(pageRef.value)
     return
   }
+  loading.value = true
+  loadError.value = false
   try {
     data.value = await getDashboard(Number(userId))
     hasProfile.value = true
-  } catch {
-    hasProfile.value = false
+  } catch (err) {
+    if (axios.isAxiosError(err) && err.response?.status === 404) {
+      // 档案确实不存在（如数据库被重置）：清除失效身份，回到建档引导
+      localStorage.removeItem('userId')
+      hasProfile.value = false
+    } else {
+      // 服务异常/网络问题：明确报错，绝不能冒充"未建档"
+      // 让老用户误以为数据丢了
+      loadError.value = true
+    }
   } finally {
     loading.value = false
     await nextTick()
-    if (!pageRef.value) return
+    if (!pageRef.value || loadError.value) return
     if (hasProfile.value && data.value) {
       dashboardEntrance(pageRef.value)
       // 数字滚动
@@ -75,13 +87,25 @@ onMounted(async () => {
       flowStepsEntrance(pageRef.value)
     }
   }
-})
+}
+
+onMounted(loadDashboard)
 </script>
 
 <template>
   <div class="home" ref="pageRef">
+    <!-- 加载失败：明确报错并提供重试，而不是伪装成未建档 -->
+    <section v-if="!loading && loadError" class="load-error">
+      <h1 class="load-error-title">数据加载失败</h1>
+      <p class="load-error-desc">
+        无法连接后端服务或数据暂时不可用。<br>
+        你的档案和打卡记录都还在，请稍后重试。
+      </p>
+      <button class="btn btn-primary" @click="loadDashboard">重新加载</button>
+    </section>
+
     <!-- 未建档：引导页 -->
-    <template v-if="!loading && !hasProfile">
+    <template v-if="!loading && !hasProfile && !loadError">
       <section class="hero">
         <p class="hero-eyebrow">基于 Agentic RAG 的智能减脂教练</p>
         <h1 class="hero-title">吃对了，练对了，<br>脂肪自然就掉了。</h1>
@@ -246,6 +270,25 @@ onMounted(async () => {
 .home {
   max-width: 900px;
   margin: 0 auto;
+}
+
+.load-error {
+  text-align: center;
+  padding: var(--space-10) var(--space-6);
+}
+
+.load-error-title {
+  font-size: var(--text-2xl);
+  font-weight: 800;
+  color: var(--color-text-primary);
+  margin-bottom: var(--space-3);
+}
+
+.load-error-desc {
+  font-size: var(--text-md);
+  color: var(--color-text-secondary);
+  line-height: var(--leading-relaxed);
+  margin-bottom: var(--space-6);
 }
 
 /* Skeleton */

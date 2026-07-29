@@ -1183,18 +1183,44 @@ class MealRecognitionFailureTests(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertEqual(self._meal_count(), 0)
 
-    def test_calculate_failure_returns_502_and_keeps_cache(self):
-        from app.api import meal as meal_module
+    def _seed_recognition(self, rid: str = "rid-1"):
+        from app.models.user import MealRecognition
 
-        meal_module.recognition_cache["rid-1"] = {
-            "user_id": 1,
-            "meal_type": "lunch",
-            "image_path": "",
+        async def seed():
+            async with self.session_factory() as session:
+                session.add(MealRecognition(
+                    id=rid,
+                    user_id=1,
+                    meal_type="lunch",
+                    image_path="",
+                    ingredients_json='[{"name":"egg","display_name":"鸡蛋","estimated_weight_g":100}]',
+                ))
+                await session.commit()
+
+        asyncio.run(seed())
+
+    def _recognition_exists(self, rid: str = "rid-1") -> bool:
+        from app.models.user import MealRecognition
+
+        async def check():
+            async with self.session_factory() as session:
+                return (await session.get(MealRecognition, rid)) is not None
+
+        return asyncio.run(check())
+
+    def test_calculate_unknown_recognition_returns_404(self):
+        payload = {
+            "recognition_id": "missing-rid",
             "ingredients": [
                 {"name": "egg", "display_name": "鸡蛋", "estimated_weight_g": 100}
             ],
-            "created_at": "2026-07-28T08:00:00",
+            "meal_type": "lunch",
         }
+        response = self.client.post("/api/meal/calculate", json=payload)
+        self.assertEqual(response.status_code, 404)
+
+    def test_calculate_failure_returns_502_and_keeps_record(self):
+        self._seed_recognition()
         payload = {
             "recognition_id": "rid-1",
             "ingredients": [
@@ -1202,19 +1228,16 @@ class MealRecognitionFailureTests(unittest.TestCase):
             ],
             "meal_type": "lunch",
         }
-        try:
-            with patch(
-                "app.api.meal.get_vision_llm",
-                side_effect=RuntimeError("llm down"),
-            ):
-                response = self.client.post("/api/meal/calculate", json=payload)
+        with patch(
+            "app.api.meal.get_vision_llm",
+            side_effect=RuntimeError("llm down"),
+        ):
+            response = self.client.post("/api/meal/calculate", json=payload)
 
-            self.assertEqual(response.status_code, 502)
-            # 缓存保留，用户可直接重试计算
-            self.assertIn("rid-1", meal_module.recognition_cache)
-            self.assertEqual(self._meal_count(), 0)
-        finally:
-            meal_module.recognition_cache.pop("rid-1", None)
+        self.assertEqual(response.status_code, 502)
+        # 识别记录保留在数据库中，用户可直接重试计算
+        self.assertTrue(self._recognition_exists())
+        self.assertEqual(self._meal_count(), 0)
 
 
 class CorsOriginsTests(unittest.TestCase):

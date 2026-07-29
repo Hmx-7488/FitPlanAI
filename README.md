@@ -44,7 +44,6 @@ SlimAgent/
 │  │  └─ graph/               # LangGraph 工作流（计划 + 复盘）
 │  ├─ data/
 │  │  ├─ knowledge_docs/      # RAG 知识文档（13 篇生效 + 1 篇废弃，含来源/证据元数据）
-│  │  ├─ docs/                # 旧版知识文档（已弃用，待清理）
 │  │  ├─ vectorstore/         # Chroma 持久化向量库
 │  │  └─ uploads/             # 上传文件存储
 │  ├─ requirements.txt

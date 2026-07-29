@@ -1,5 +1,4 @@
 """餐食热量识别 API"""
-import asyncio
 import json
 import logging
 import uuid
@@ -10,10 +9,9 @@ from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from app.core.database import get_db
-from app.core.time import now_local, today_str
-from app.models.user import User, MealLog
+from app.core.time import today_str
+from app.models.user import User, MealLog, MealRecognition
 from app.services.image_utils import (
-    SUPPORTED_IMAGE_MIME_TYPES,
     image_extension,
     validate_image,
 )
@@ -25,11 +23,6 @@ logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = Path(__file__).parent.parent.parent / "data" / "uploads" / "meals"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-# 临时存储识别结果（生产环境应使用 Redis 或数据库）
-recognition_cache: dict[str, dict] = {}
-_cache_lock = asyncio.Lock()
-
 
 MEAL_TYPES = ("breakfast", "lunch", "dinner", "snack")
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -278,16 +271,16 @@ async def recognize_meal(
         saved_path.unlink(missing_ok=True)
         raise HTTPException(status_code=502, detail="未能识别到食物，请重新拍摄")
 
-    # 生成识别 ID 并缓存结果
+    # 生成识别记录并持久化（计算成功后删除）
     recognition_id = uuid.uuid4().hex
-    async with _cache_lock:
-        recognition_cache[recognition_id] = {
-            "user_id": user_id,
-            "meal_type": meal_type,
-            "image_path": str(saved_path),
-            "ingredients": ingredients,
-            "created_at": now_local().isoformat(),
-        }
+    db.add(MealRecognition(
+        id=recognition_id,
+        user_id=user_id,
+        meal_type=meal_type,
+        image_path=str(saved_path),
+        ingredients_json=json.dumps(ingredients, ensure_ascii=False),
+    ))
+    await db.commit()
 
     return {
         "recognition_id": recognition_id,
@@ -301,17 +294,16 @@ async def calculate_meal(
     db: AsyncSession = Depends(get_db),
 ):
     """根据用户确认的食材和重量计算营养"""
-    # 获取缓存的识别结果（原子读取）
-    async with _cache_lock:
-        cached = recognition_cache.pop(request.recognition_id, None)
+    # 读取持久化的识别结果；计算成功后删除，失败时保留以便直接重试
+    cached = await db.get(MealRecognition, request.recognition_id)
     if not cached:
         raise HTTPException(status_code=404, detail="识别结果已过期，请重新识别")
 
-    user_id = cached["user_id"]
-    meal_type = request.meal_type or cached.get("meal_type", "lunch")
+    user_id = cached.user_id
+    meal_type = request.meal_type or cached.meal_type or "lunch"
     if meal_type not in MEAL_TYPES:
         raise HTTPException(status_code=400, detail=f"Unsupported meal_type: {meal_type}")
-    image_path = cached["image_path"]
+    image_path = cached.image_path
     user = await db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
@@ -345,14 +337,12 @@ async def calculate_meal(
             raw = raw[json_start:json_end]
         nutrition = json.loads(raw)
     except Exception:
-        # 营养计算失败：明确报错并保留识别缓存（允许用户直接重试计算），
+        # 营养计算失败：明确报错；识别记录保留在数据库中，用户可直接重试。
         # 不用拍脑袋的启发式数值冒充真实营养数据落库
         logger.exception(
             "Vision Model nutrition calculation failed. recognition_id=%s",
             request.recognition_id,
         )
-        async with _cache_lock:
-            recognition_cache[request.recognition_id] = cached
         raise HTTPException(status_code=502, detail="营养计算失败，请点击重试")
 
     meal_total = {
@@ -438,9 +428,9 @@ async def calculate_meal(
         meal_total_json=json.dumps(meal_total, ensure_ascii=False),
     )
     db.add(meal_log)
+    # 识别暂存记录使命完成，随本次事务一并删除
+    await db.delete(cached)
     await db.commit()
-
-    # 缓存已在上方 pop 时清理
 
     return {
         "meal_type": meal_type,
