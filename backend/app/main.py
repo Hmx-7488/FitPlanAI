@@ -3,6 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from app.core.config import get_settings
 from app.core.database import init_db
 from app.api.profile import router as profile_router
 from app.api.plan import router as plan_router
@@ -34,8 +35,9 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    # 仅允许配置的前端来源；前端未使用 Cookie/凭据，credentials 保持关闭
+    allow_origins=get_settings().cors_origin_list,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

@@ -1,6 +1,6 @@
 # SlimAgent（FitPlanAI）
 
-基于 LLM + LangGraph + RAG 的个性化减脂/增肌 AI Agent，支持用户建档、营养计算、训练计划生成、食材图片识别、轻食菜谱生成、餐食热量识别、身材照片分析、AI 动作分析、每日打卡和 AI 复盘。后续将把现有知识检索升级为带来源治理、混合检索和质量评估的统一知识层，并在此基础上增加受控的上下文聊天 Agent。
+基于 LLM + LangGraph + RAG 的个性化减脂/增肌 AI Agent，支持用户建档、营养计算、训练计划生成、食材图片识别、轻食菜谱生成（含 AI 成品图）、餐食热量识别、身材照片分析、AI 动作分析（MediaPipe 关键点 + Vision 解释）、每日打卡、AI 复盘和带来源引用的上下文聊天助手。知识检索为带来源治理、混合检索和质量评估的统一知识层。
 
 ## 技术栈
 
@@ -23,7 +23,7 @@
 SlimAgent/
 ├─ backend/
 │  ├─ app/
-│  │  ├─ main.py              # FastAPI 入口（v0.5.0）
+│  │  ├─ main.py              # FastAPI 入口（v0.6.0）
 │  │  ├─ api/
 │  │  │  ├─ profile.py        # 用户档案接口
 │  │  │  ├─ plan.py           # 计划生成接口
@@ -32,7 +32,9 @@ SlimAgent/
 │  │  │  ├─ body.py           # 身材照片分析（Vision Model）
 │  │  │  ├─ pose.py           # AI 动作分析（Vision Model）
 │  │  │  ├─ meal.py           # 餐食热量识别接口
-│  │  │  └─ dashboard.py      # Dashboard 聚合接口
+│  │  │  ├─ dashboard.py      # Dashboard 聚合接口
+│  │  │  ├─ knowledge.py      # 知识库检索与管理接口
+│  │  │  └─ chat.py           # 上下文聊天 Agent 接口
 │  │  ├─ core/                # 配置与数据库
 │  │  ├─ models/              # SQLAlchemy 数据模型
 │  │  ├─ schemas/             # Pydantic schemas
@@ -41,7 +43,8 @@ SlimAgent/
 │  │  ├─ tools/               # 营养计算工具
 │  │  └─ graph/               # LangGraph 工作流（计划 + 复盘）
 │  ├─ data/
-│  │  ├─ docs/                # RAG 知识文档（7 篇）
+│  │  ├─ knowledge_docs/      # RAG 知识文档（13 篇生效 + 1 篇废弃，含来源/证据元数据）
+│  │  ├─ docs/                # 旧版知识文档（已弃用，待清理）
 │  │  ├─ vectorstore/         # Chroma 持久化向量库
 │  │  └─ uploads/             # 上传文件存储
 │  ├─ requirements.txt
@@ -175,39 +178,29 @@ RAG 检索 → 分析打卡记录 → 次日调整建议
 
 ## RAG 知识库
 
-当前版本已使用 7 篇本地知识文档和 Chroma 完成基础语义检索，并提供关键词降级检索。
+知识层位于 `backend/data/knowledge_docs/`，当前 14 篇文档（13 篇生效 + 1 篇废弃保留）。每个知识块带来源、证据等级、适用目标（减脂/增肌/通用）、训练水平、禁忌、安全替代和风险标签等元数据。
 
-| 知识库 | 文件 | 内容 |
-|--------|------|------|
-| 食物热量 | food_calories.md | 60+ 食材热量和营养素 |
-| 运动消耗 | exercise_calories.md | 40+ 运动消耗数据 |
-| 减脂原则 | fat_loss_principles.md | 饮食和运动原则 |
-| 训练动作 | training_exercises.md | 按肌群分类的动作库 |
-| 常见食谱 | common_recipes.md | 轻食食谱参考 |
-| 风险规则 | risk_rules.md | 健康风险规则 |
-| 饮食误区 | dietary_myths.md | 常见饮食误区 |
+| 类别 | 代表文档 | 内容 |
+|------|----------|------|
+| 减脂标准 | fat_loss_core_principles.md、fat_loss_protein_intake.md | 热量缺口原则、蛋白质摄入标准 |
+| 增肌营养 | muscle_gain_nutrition.md | 增肌期热量盈余与营养分配 |
+| 饮食规划 | meal_planning_guide.md、chinese_meal_guide.md | 餐次规划、中式饮食场景 |
+| 动作技术 | squat/deadlift/bench_press/pull_up/push_up_technique.md | 五大动作标准、常见错误与纠正 |
+| 风险规则 | exercise_risk_rules.md、health_risk_rules.md | 伤病禁忌、特殊人群风险 |
 
-下一阶段将扩充为面向生产使用的专业知识层：
+检索链路：Chroma 语义检索 + 关键词检索 → 元数据过滤（目标类型、训练水平、伤病禁忌、饮食限制别名）→ 去重重排 → 证据充分性评估（证据不足时明确拒答而非编造）。内置固定查询集评测（`/api/knowledge/evaluate`），索引导入失败自动回滚旧版本。
 
-- 补充减脂、增肌、饮食规划、训练原则、动作标准和特殊人群风险资料。
-- 为知识块增加来源、发布日期、证据等级、适用目标、适用条件、禁忌和版本信息。
-- 使用语义检索、关键词检索、元数据过滤、去重和重排组成混合检索链路。
-- 在计划、动作建议、身材建议、复盘和问答中统一调用。
-- 输出引用来源；没有可靠依据时明确拒绝编造结论。
-- 建立固定查询集，评估召回率、相关性、引用正确性和安全边界。
+## 上下文聊天 Agent
 
-## 上下文聊天 Agent（规划中）
+聊天助手（`/chat` 页）已实现第一阶段能力：
 
-聊天 Agent 将定位为“健康计划助手”，优先解决以下任务：
+- 自动注入用户档案、最新计划和页面上下文，不是空白聊天机器人。
+- 流式输出（SSE），支持停止生成、会话归档和多会话管理。
+- 检索知识层并返回真实引用来源；证据不足时明确说明，不编造。
+- 风险拦截：极端节食等高风险提问会触发安全提示与就医建议。
+- 工具全部为只读，不能修改档案、计划或打卡（遵循"人在回路"原则）。
 
-- 解释当前营养目标、饮食计划、训练计划和分析结果。
-- 回答与当前页面相关的减脂、增肌、饮食和训练问题。
-- 读取用户档案、今日摄入、训练安排和历史分析。
-- 生成食材替换、餐次调整和训练调整草案。
-- 展示修改前后的热量、营养素和训练安排差异。
-- 仅在用户确认后写入计划。
-
-第一阶段先在业务结果页提供上下文问答，不立即增加脱离业务上下文的空白全局聊天页。
+后续迭代：计划调整草案、差异预览和用户确认后写入。
 
 ## API 接口
 
@@ -229,8 +222,19 @@ RAG 检索 → 分析打卡记录 → 次日调整建议
 | GET  | `/api/vision/recipes/latest/{id}` | 获取最新菜谱 | ✅ 已实现 |
 | POST | `/api/body/analyze` | 身材照片分析（Vision Model + BMI 降级） | ✅ 已实现 |
 | POST | `/api/pose/analyze` | AI 动作分析（Vision Model + 模板降级） | ✅ 已实现 |
-| POST | `/api/meal/analyze` | 餐食热量识别 | ✅ 已实现 |
+| POST | `/api/meal/analyze` | 餐食热量识别（一步完成） | ✅ 已实现 |
+| POST | `/api/meal/recognize` | 餐食识别第一步：识别食材 | ✅ 已实现 |
+| POST | `/api/meal/calculate` | 餐食识别第二步：确认后计算营养 | ✅ 已实现 |
 | GET  | `/api/meal/daily-summary/{id}` | 每日热量汇总 | ✅ 已实现 |
+| GET  | `/api/body/history/{id}` | 身材分析历史 | ✅ 已实现 |
+| POST | `/api/knowledge/search` | 知识库混合检索（公开） | ✅ 已实现 |
+| GET  | `/api/knowledge/status` | 知识索引状态 | ✅ 已实现 |
+| POST | `/api/knowledge/rebuild` | 重建索引（需管理员密钥） | ✅ 已实现 |
+| POST | `/api/knowledge/evaluate` | 检索质量评测（需管理员密钥） | ✅ 已实现 |
+| POST | `/api/chat/conversations` | 创建聊天会话 | ✅ 已实现 |
+| GET  | `/api/chat/conversations` | 会话列表 | ✅ 已实现 |
+| POST | `/api/chat/conversations/{id}/messages/stream` | 流式发送消息（SSE） | ✅ 已实现 |
+| DELETE | `/api/chat/conversations/{id}` | 归档会话 | ✅ 已实现 |
 
 ## 功能实现状态
 
@@ -253,21 +257,21 @@ RAG 检索 → 分析打卡记录 → 次日调整建议
 | AI 复盘 | ✅ 已实现 | 目标类型分支、复盘总结+次日建议 |
 | 身材照片分析 | ✅ 已实现 | Vision Model 体脂率估算 + BMI 降级，自动回填档案 |
 | AI 动作分析 | ✅ 已实现 | Vision Model 动作质量评分 + 模板降级，伤病风险提示 |
-| 餐食热量识别 | ✅ 已实现 | Vision Model 识别+每日缺口计算 |
+| 餐食热量识别 | ✅ 已实现 | Vision Model 识别+每日缺口计算，失败明确报错不写假数据 |
 | 每日热量汇总 | ✅ 已实现 | 当日摄入、剩余配额、缺口状态 |
+| 上下文聊天 Agent | ✅ 已实现 | 档案/计划上下文注入、流式输出、引用、风险拦截 |
+| 知识库混合检索 | ✅ 已实现 | 语义+关键词+元数据过滤+证据评估+评测套件 |
 
 ## 后续迭代（规划中）
 
 - ~~接入真实体态分析模型替代身材照片 Mock~~ ✅ 已接入 Vision Model
-- ~~接入姿态估计模型替代动作分析 Mock~~ ✅ 已接入 Vision Model
-- RAG 知识来源、证据等级、适用条件和版本治理
-- 减脂、增肌、饮食规划和训练原则知识库扩充
-- 混合检索、元数据过滤、重排和检索评估
-- 计划、动作、身材和复盘页面上下文问答
-- 全局聊天 Agent 与受控工具调用
+- ~~接入姿态估计模型替代动作分析 Mock~~ ✅ MediaPipe 关键点 + Vision 解释
+- ~~RAG 知识来源、证据等级、适用条件和版本治理~~ ✅ 已实现
+- ~~混合检索、元数据过滤、重排和检索评估~~ ✅ 已实现
+- ~~全局聊天 Agent 与受控工具调用~~ ✅ 已实现（只读工具）
+- ~~菜谱成品图自动生成~~ ✅ 已接入 DashScope 文生图
 - 计划调整草案、差异预览和用户确认后写入
-- 中国菜品热量库和地域饮食库
-- 食材缺口智能分析（ingredient_gap_tool）
+- 计划、动作、身材和复盘页面内嵌上下文问答
+- 中国菜品热量库和地域饮食库扩充
 - 打卡围度记录与身材照片对比
-- 菜谱成品图自动生成（接入图片生成模型）
 - 体重趋势图表和打卡历史可视化

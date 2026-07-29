@@ -85,12 +85,22 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./slim_agent.db"
     APP_ENV: str = "development"
     KNOWLEDGE_ADMIN_KEY: str = ""
+    # 允许的前端来源，逗号分隔；默认仅本地开发端口
+    CORS_ORIGINS: str = (
+        "http://localhost:3000,http://127.0.0.1:3000,"
+        "http://localhost:5173,http://127.0.0.1:5173"
+    )
 
     model_config = {
         "env_file": str(BACKEND_DIR / ".env"),
         "env_file_encoding": "utf-8",
         "extra": "ignore",
     }
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        """解析 CORS_ORIGINS 为来源列表，忽略空项。"""
+        return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
 
 
 @lru_cache

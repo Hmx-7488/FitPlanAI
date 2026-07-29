@@ -106,8 +106,8 @@ Agent 可以自主执行：
 ## 本地开发
 
 - 后端：`cd backend && python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000`
-- 前端：`cd frontend && npm run dev -- --host 127.0.0.1 --port 5173`
-- 前端地址：`http://127.0.0.1:5173`
+- 前端：`cd frontend && npm run dev`（vite.config 已固定端口 3000 并代理到 8000）
+- 前端地址：`http://127.0.0.1:3000`
 - 后端地址：`http://127.0.0.1:8000`
 
 如果端口已被占用，优先复用现有项目进程或选择其他端口，不得终止无关进程。
