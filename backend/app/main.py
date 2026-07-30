@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI
@@ -19,9 +20,19 @@ from app.api.chat import router as chat_router
 UPLOAD_DIR = Path(__file__).parent.parent / "data" / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings = get_settings()
+    if settings.APP_ENV != "development":
+        logger.warning(
+            "APP_ENV=%s：本应用 API 无用户鉴权，定位为单用户本地应用。"
+            "请勿将后端暴露到公网或不受信网络；如需远程访问，"
+            "请在反向代理层增加访问控制。",
+            settings.APP_ENV,
+        )
     await init_db()
     yield
 

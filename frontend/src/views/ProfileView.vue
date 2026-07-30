@@ -2,7 +2,7 @@
 import { ref, onMounted, nextTick, useTemplateRef } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { createProfile, getProfile, estimateBodyFat } from '../api'
+import { createProfile, getProfile, analyzeBodyPhoto } from '../api'
 import type { UserProfile } from '../types'
 import gsap from 'gsap'
 
@@ -30,11 +30,12 @@ const bodyPhotoFile = ref<File | null>(null)
 const bodyPhotoPreview = ref('')
 const bodyFatResult = ref<{
   photo_url: string
-  body_fat_estimate: number
+  body_fat_estimate: number | null
   body_fat_range: string
   training_focus: string[]
   nutrition_suggestion: string
   note: string
+  auto_filled: boolean
 } | null>(null)
 
 const form = ref<UserProfile>({
@@ -184,14 +185,28 @@ async function doBodyPhotoAnalyze() {
   if (!bodyPhotoFile.value || !createdUserId.value) return
   step.value = 'analyzing'
   try {
-    const result = await estimateBodyFat(createdUserId.value, bodyPhotoFile.value)
-    bodyFatResult.value = result
-    // 更新表单中的体脂率
-    if (result.body_fat_estimate) {
-      form.value.body_fat_rate = result.body_fat_estimate
+    // 统一走身材分析主接口（质量校验 + 置信度门槛 + 历史记录）
+    const result = await analyzeBodyPhoto(createdUserId.value, { front: bodyPhotoFile.value })
+    const estimate = result.body_fat_estimate?.value ?? null
+    bodyFatResult.value = {
+      photo_url: result.photo_url || '',
+      body_fat_estimate: estimate,
+      body_fat_range: result.body_fat_estimate?.estimated_range || '',
+      training_focus: result.training_focus || [],
+      nutrition_suggestion: result.nutrition_suggestion || '',
+      note: result.body_fat_estimate?.note || '',
+      auto_filled: result.auto_filled === true,
+    }
+    if (estimate !== null && result.auto_filled) {
+      // 只有达到置信度门槛被后端写入档案时才更新表单
+      form.value.body_fat_rate = estimate
+      ElMessage.success('身材分析完成，体脂率已自动填入')
+    } else if (estimate !== null) {
+      ElMessage.success('分析完成，置信度不足未写入档案，可手动填写体脂率')
+    } else {
+      ElMessage.warning('照片质量未通过，未生成体脂估算，可重新拍摄或跳过')
     }
     step.value = 'result'
-    ElMessage.success('身材分析完成，体脂率已自动填入')
   } catch (err: any) {
     ElMessage.error(err.response?.data?.detail || '分析失败')
     step.value = 'photo'
@@ -631,14 +646,17 @@ function goToAnalysis() {
         </div>
 
         <div class="result-card result-card--highlight">
-          <div class="result-main">
-            <span class="result-value">{{ bodyFatResult.body_fat_estimate }}</span>
-            <span class="result-unit">%</span>
-          </div>
-          <div class="result-label">AI 估算体脂率</div>
-          <div class="result-range">范围：{{ bodyFatResult.body_fat_range }}</div>
+          <template v-if="bodyFatResult.body_fat_estimate !== null">
+            <div class="result-main">
+              <span class="result-value">{{ bodyFatResult.body_fat_estimate }}</span>
+              <span class="result-unit">%</span>
+            </div>
+            <div class="result-label">AI 估算体脂率</div>
+            <div class="result-range" v-if="bodyFatResult.body_fat_range">范围：{{ bodyFatResult.body_fat_range }}</div>
+          </template>
+          <div v-else class="result-label">本次未生成体脂估算</div>
           <p class="result-note">{{ bodyFatResult.note }}</p>
-          <div class="auto-filled-badge">&#10003; 已自动填入档案</div>
+          <div class="auto-filled-badge" v-if="bodyFatResult.auto_filled">&#10003; 已自动填入档案</div>
         </div>
 
         <div class="result-card" v-if="bodyFatResult.training_focus.length">

@@ -1264,73 +1264,19 @@ class CorsOriginsTests(unittest.TestCase):
         self.assertNotIn("*", settings.cors_origin_list)
 
 
-class BodyFatEstimateTests(unittest.TestCase):
-    """estimate-body-fat：内容校验 + 降级结果不回填档案。"""
+class LegacyBodyFatEndpointRemovedTests(unittest.TestCase):
+    """旧的 /api/profile/{id}/estimate-body-fat 已下线，统一走 /api/body/analyze。"""
 
-    def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        db_path = Path(self.temp_dir.name) / "profile-test.db"
-        self.engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
-        self.session_factory = async_sessionmaker(
-            self.engine, expire_on_commit=False
-        )
-
-        async def override_db():
-            async with self.session_factory() as session:
-                yield session
-
-        app.dependency_overrides[get_db] = override_db
-
-        async def prepare():
-            async with self.engine.begin() as connection:
-                await connection.run_sync(Base.metadata.create_all)
-            async with self.session_factory() as session:
-                session.add(User(
-                    id=1, gender="male", age=30, height=175, weight=75,
-                    target_weight=70, body_fat_rate=None,
-                ))
-                await session.commit()
-
-        asyncio.run(prepare())
-        self.client = TestClient(app)
-
-    def tearDown(self):
-        self.client.close()
-        app.dependency_overrides.clear()
-        asyncio.run(self.engine.dispose())
-        self.temp_dir.cleanup()
-
-    def _stored_body_fat(self):
-        async def load():
-            async with self.session_factory() as session:
-                user = await session.get(User, 1)
-                return user.body_fat_rate
-
-        return asyncio.run(load())
-
-    def test_rejects_non_image_upload(self):
-        response = self.client.post(
-            "/api/profile/1/estimate-body-fat",
-            files={"image": ("evil.html", b"<script>alert(1)</script>", "text/html")},
-        )
-        self.assertEqual(response.status_code, 400)
-
-    def test_fallback_does_not_write_profile(self):
-        with patch(
-            "app.services.vision_service.get_vision_llm",
-            side_effect=RuntimeError("vision down"),
-        ):
-            response = self.client.post(
+    def test_legacy_endpoint_is_gone(self):
+        client = TestClient(app)
+        try:
+            response = client.post(
                 "/api/profile/1/estimate-body-fat",
                 files={"image": ("body.png", png_header(32, 24), "image/png")},
             )
-
-        self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertFalse(data["auto_filled"])
-        self.assertIn("不会写入档案", data["note"])
-        # 降级估值绝不能污染档案
-        self.assertIsNone(self._stored_body_fat())
+            self.assertIn(response.status_code, (404, 405))
+        finally:
+            client.close()
 
 
 if __name__ == "__main__":

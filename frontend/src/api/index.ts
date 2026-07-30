@@ -41,24 +41,6 @@ export async function updateProfile(userId: number, data: Partial<UserProfile>):
   return res.data
 }
 
-export async function estimateBodyFat(userId: number, imageFile: File) {
-  const formData = new FormData()
-  formData.append('image', imageFile)
-  const res = await api.post(`/profile/${userId}/estimate-body-fat`, formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-    timeout: 120000,
-  })
-  return res.data as {
-    photo_url: string
-    body_fat_estimate: number
-    body_fat_range: string
-    training_focus: string[]
-    nutrition_suggestion: string
-    note: string
-    auto_filled: boolean
-  }
-}
-
 // 减脂计划
 export async function getLatestPlan(userId: number): Promise<PlanResponse | null> {
   const res = await api.get<PlanResponse | null>(`/plan/latest/${userId}`)

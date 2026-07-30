@@ -81,7 +81,7 @@ cd backend
 # 编辑 .env 填入 LLM_API_KEY、LLM_BASE_URL、LLM_MODEL、VISION_MODEL
 
 pip install -r requirements.txt
-python -m uvicorn app.main:app --reload --port 8000
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 访问 http://127.0.0.1:8000/docs 查看 API 文档。
@@ -95,6 +95,14 @@ npm run dev
 ```
 
 访问 http://localhost:3000 打开应用。
+
+## 部署与安全
+
+- 本应用定位为**单用户本地应用**：API 无用户鉴权，身份标识存于浏览器 localStorage。
+- 后端只应绑定 `127.0.0.1`；请勿直接暴露到公网或不受信网络。如需远程访问，自行在反向代理层加访问控制。
+- `APP_ENV` 非 development 启动时会输出无鉴权警告；知识库管理接口在 production 下必须配置 `KNOWLEDGE_ADMIN_KEY`。
+- 上传的身材照片经 `/uploads` 静态路径访问，文件名随机不可枚举，但无访问控制，同样依赖"本地/受信网络"前提。
+- 跨域来源由 `CORS_ORIGINS` 白名单控制，默认仅允许本地开发端口。
 
 ## 核心功能
 
@@ -209,7 +217,6 @@ RAG 检索 → 分析打卡记录 → 次日调整建议
 | POST | `/api/profile/create` | 创建用户档案（含训练条件+饮食习惯） | ✅ 已实现 |
 | GET  | `/api/profile/{id}` | 获取用户档案 | ✅ 已实现 |
 | PATCH | `/api/profile/{id}` | 部分更新用户档案 | ✅ 已实现 |
-| POST | `/api/profile/{id}/estimate-body-fat` | 身材照片估算体脂率并回填 | ✅ 已实现 |
 | POST | `/api/plan/generate` | 生成训练计划（使用新字段） | ✅ 已实现 |
 | GET  | `/api/plan/latest/{id}` | 获取最新计划 | ✅ 已实现 |
 | POST | `/api/checkin/create` | 创建/更新每日打卡 | ✅ 已实现 |
