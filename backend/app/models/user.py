@@ -141,6 +141,29 @@ class MealRecognition(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class Exercise(Base):
+    """动作库：1,324 个结构化健身动作。
+
+    数据来源 exercises-dataset（© Gym visual 媒体署名保留）。
+    首次启动时从 data/exercises/exercises_zh.json 自动导入。
+    """
+    __tablename__ = "exercises"
+
+    id: Mapped[str] = mapped_column(String(4), primary_key=True)  # "0025"
+    name: Mapped[str] = mapped_column(String(200))  # 英文名
+    name_zh: Mapped[str] = mapped_column(String(200), default="")  # 中文名（翻译后填入）
+    body_part: Mapped[str] = mapped_column(String(50), index=True)  # chest/back/upper arms/...
+    equipment: Mapped[str] = mapped_column(String(50), index=True)  # barbell/dumbbell/body weight/...
+    target: Mapped[str] = mapped_column(String(100), default="")  # 目标肌
+    muscle_group: Mapped[str] = mapped_column(String(100), default="")  # 主协同肌
+    secondary_muscles: Mapped[str] = mapped_column(Text, default="[]")  # JSON array
+    difficulty: Mapped[str] = mapped_column(String(20), default="intermediate", index=True)  # beginner/intermediate/advanced
+    instructions_zh: Mapped[str] = mapped_column(Text, default="")
+    instruction_steps_zh: Mapped[str] = mapped_column(Text, default="[]")  # JSON array
+    image_path: Mapped[str] = mapped_column(String(200), default="")  # 缩略图文件名
+    gif_path: Mapped[str] = mapped_column(String(200), default="")  # 动图文件名
+
+
 class BodyAnalysis(Base):
     """Persisted body-composition analysis and comparison context."""
     __tablename__ = "body_analyses"

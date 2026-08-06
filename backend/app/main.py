@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from app.core.config import get_settings
-from app.core.database import init_db
+from app.core.database import init_db, async_session
 from app.api.profile import router as profile_router
 from app.api.plan import router as plan_router
 from app.api.checkin import router as checkin_router
@@ -16,9 +16,14 @@ from app.api.meal import router as meal_router
 from app.api.dashboard import router as dashboard_router
 from app.api.knowledge import router as knowledge_router
 from app.api.chat import router as chat_router
+from app.api.exercises import router as exercises_router
+from app.services.exercise_service import import_exercises_if_empty
 
 UPLOAD_DIR = Path(__file__).parent.parent / "data" / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+EXERCISE_MEDIA_DIR = Path(__file__).parent.parent / "data" / "exercises" / "exercise_media"
+EXERCISE_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +39,11 @@ async def lifespan(app: FastAPI):
             settings.APP_ENV,
         )
     await init_db()
+    # 首次启动自动导入动作库
+    async with async_session() as session:
+        imported = await import_exercises_if_empty(session)
+        if imported:
+            logger.info("Exercise dataset imported: %d records.", imported)
     yield
 
 
@@ -63,9 +73,13 @@ app.include_router(meal_router, prefix="/api/meal", tags=["餐食热量识别"])
 app.include_router(dashboard_router, prefix="/api/dashboard", tags=["Dashboard"])
 app.include_router(knowledge_router, prefix="/api/knowledge", tags=["知识库"])
 app.include_router(chat_router, prefix="/api/chat", tags=["聊天 Agent"])
+app.include_router(exercises_router, prefix="/api/exercises", tags=["动作库"])
 
 # 静态文件：上传的图片
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
+
+# 静态文件：动作库媒体（GIF + 缩略图，© Gym visual）
+app.mount("/exercises/media", StaticFiles(directory=str(EXERCISE_MEDIA_DIR)), name="exercise-media")
 
 
 @app.get("/")
