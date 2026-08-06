@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import tempfile
 import unittest
@@ -1277,6 +1278,276 @@ class LegacyBodyFatEndpointRemovedTests(unittest.TestCase):
             self.assertIn(response.status_code, (404, 405))
         finally:
             client.close()
+
+
+class CalorieAdjustmentTests(unittest.TestCase):
+    """复盘驱动的热量调整草案：确定性规则。"""
+
+    @staticmethod
+    def _points(*entries):
+        return list(entries)
+
+    def test_fat_loss_slow_progress_suggests_decrease(self):
+        from app.services.adjustment_service import compute_calorie_adjustment
+
+        # 14 天减 0.1kg（约 -0.06%/周），低于 -0.25%/周 → 建议下调
+        points = self._points(
+            ("2026-07-01", 80.0), ("2026-07-08", 79.95), ("2026-07-15", 79.9),
+        )
+        result = compute_calorie_adjustment("fat_loss", points, 2000)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["suggested_target"], 1850)
+        self.assertLess(result["delta_kcal"], 0)
+
+    def test_fat_loss_too_fast_suggests_increase(self):
+        from app.services.adjustment_service import compute_calorie_adjustment
+
+        # 14 天减 2.4kg（约 -1.5%/周） → 建议上调
+        points = self._points(
+            ("2026-07-01", 80.0), ("2026-07-08", 78.8), ("2026-07-15", 77.6),
+        )
+        result = compute_calorie_adjustment("fat_loss", points, 1600)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["suggested_target"], 1750)
+
+    def test_fat_loss_on_track_returns_none(self):
+        from app.services.adjustment_service import compute_calorie_adjustment
+
+        # 14 天减 0.8kg（约 -0.5%/周），在健康区间 → 不调整
+        points = self._points(
+            ("2026-07-01", 80.0), ("2026-07-08", 79.6), ("2026-07-15", 79.2),
+        )
+        self.assertIsNone(compute_calorie_adjustment("fat_loss", points, 2000))
+
+    def test_muscle_gain_slow_suggests_increase(self):
+        from app.services.adjustment_service import compute_calorie_adjustment
+
+        points = self._points(
+            ("2026-07-01", 70.0), ("2026-07-08", 70.0), ("2026-07-15", 70.02),
+        )
+        result = compute_calorie_adjustment("muscle_gain", points, 2800)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["suggested_target"], 2950)
+
+    def test_muscle_gain_too_fast_suggests_decrease(self):
+        from app.services.adjustment_service import compute_calorie_adjustment
+
+        points = self._points(
+            ("2026-07-01", 70.0), ("2026-07-08", 70.5), ("2026-07-15", 71.05),
+        )
+        result = compute_calorie_adjustment("muscle_gain", points, 2800)
+        self.assertIsNotNone(result)
+        self.assertLess(result["delta_kcal"], 0)
+
+    def test_insufficient_data_returns_none(self):
+        from app.services.adjustment_service import compute_calorie_adjustment
+
+        # 只有 2 次称重
+        self.assertIsNone(compute_calorie_adjustment(
+            "fat_loss", [("2026-07-01", 80.0), ("2026-07-20", 78.0)], 2000,
+        ))
+        # 跨度不足 10 天
+        self.assertIsNone(compute_calorie_adjustment(
+            "fat_loss",
+            [("2026-07-10", 80.0), ("2026-07-12", 79.8), ("2026-07-14", 79.6)],
+            2000,
+        ))
+
+    def test_safe_floor_respected(self):
+        from app.services.adjustment_service import compute_calorie_adjustment
+
+        points = self._points(
+            ("2026-07-01", 80.0), ("2026-07-08", 79.95), ("2026-07-15", 79.9),
+        )
+        result = compute_calorie_adjustment("fat_loss", points, 1250)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["suggested_target"], 1200)
+
+
+class AdjustCaloriesEndpointTests(unittest.TestCase):
+    """确认写入端点：更新最新计划目标并重算宏量。"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        db_path = Path(self.temp_dir.name) / "plan-test.db"
+        self.engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+        self.session_factory = async_sessionmaker(
+            self.engine, expire_on_commit=False
+        )
+
+        async def override_db():
+            async with self.session_factory() as session:
+                yield session
+
+        app.dependency_overrides[get_db] = override_db
+
+        async def prepare():
+            async with self.engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            async with self.session_factory() as session:
+                from app.models.user import Plan
+
+                session.add(User(
+                    id=1, gender="male", age=30, height=175, weight=75,
+                    target_weight=70,
+                ))
+                session.add(Plan(
+                    id=1, user_id=1, daily_calorie_target=2000,
+                    calorie_info_json='{"tdee": 2500, "deficit": 500}',
+                    macros_json='{"protein_g": 120, "carbs_g": 200, "fat_g": 56}',
+                    meal_plan="m", workout_plan="w",
+                ))
+                session.add(User(
+                    id=2, gender="female", age=28, height=165, weight=60,
+                    target_weight=55,
+                ))
+                await session.commit()
+
+        asyncio.run(prepare())
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        self.client.close()
+        app.dependency_overrides.clear()
+        asyncio.run(self.engine.dispose())
+        self.temp_dir.cleanup()
+
+    def test_adjust_updates_target_and_macros(self):
+        response = self.client.post(
+            "/api/plan/adjust-calories",
+            json={"user_id": 1, "daily_calorie_target": 1800},
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["daily_calorie_target"], 1800)
+        self.assertEqual(data["calorie_info"]["target_calories"], 1800)
+        self.assertEqual(data["calorie_info"]["deficit"], 700)
+        # 宏量按新目标重算，不再是旧值
+        self.assertNotEqual(data["macros"]["fat_g"], 56)
+
+    def test_adjust_without_plan_returns_404(self):
+        response = self.client.post(
+            "/api/plan/adjust-calories",
+            json={"user_id": 2, "daily_calorie_target": 1800},
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_adjust_out_of_range_rejected(self):
+        response = self.client.post(
+            "/api/plan/adjust-calories",
+            json={"user_id": 1, "daily_calorie_target": 500},
+        )
+        self.assertEqual(response.status_code, 422)
+
+
+class BodyAnalysisDeleteTests(unittest.TestCase):
+    """隐私删除入口：删记录 + 删照片文件。"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        db_path = Path(self.temp_dir.name) / "body-test.db"
+        self.engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+        self.session_factory = async_sessionmaker(
+            self.engine, expire_on_commit=False
+        )
+
+        async def override_db():
+            async with self.session_factory() as session:
+                yield session
+
+        app.dependency_overrides[get_db] = override_db
+
+        async def prepare():
+            async with self.engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            async with self.session_factory() as session:
+                session.add(User(
+                    id=1, gender="male", age=30, height=175, weight=75,
+                    target_weight=70,
+                ))
+                await session.commit()
+
+        asyncio.run(prepare())
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        self.client.close()
+        app.dependency_overrides.clear()
+        asyncio.run(self.engine.dispose())
+        self.temp_dir.cleanup()
+
+    def _seed_record(self, user_id: int, photo_name: str) -> int:
+        from app.models.user import BodyAnalysis
+
+        async def seed():
+            async with self.session_factory() as session:
+                record = BodyAnalysis(
+                    user_id=user_id,
+                    photo_urls_json=json.dumps({"front": f"/uploads/body/{photo_name}"}),
+                )
+                session.add(record)
+                await session.commit()
+                return record.id
+
+        return asyncio.run(seed())
+
+    def test_delete_removes_record_and_photo(self):
+        import uuid as _uuid
+        from app.api.body import UPLOAD_DIR
+        from app.models.user import BodyAnalysis
+
+        photo_name = f"{_uuid.uuid4().hex}_front.png"
+        photo_path = UPLOAD_DIR / photo_name
+        photo_path.write_bytes(b"fake")
+        record_id = self._seed_record(1, photo_name)
+
+        response = self.client.delete(f"/api/body/history/1/body_{record_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["deleted"])
+        self.assertFalse(photo_path.exists(), "照片文件应被删除")
+
+        async def check():
+            async with self.session_factory() as session:
+                return await session.get(BodyAnalysis, record_id)
+
+        self.assertIsNone(asyncio.run(check()), "数据库记录应被删除")
+
+    def test_delete_other_users_record_returns_404(self):
+        record_id = self._seed_record(1, "nobody.png")
+        response = self.client.delete(f"/api/body/history/999/body_{record_id}")
+        self.assertEqual(response.status_code, 404)
+
+
+class AdditiveMigrationTests(unittest.TestCase):
+    """老库增量迁移：缺列时补列，不缺时不动作。"""
+
+    def test_adds_target_weeks_to_legacy_users_table(self):
+        import sqlite3
+        from sqlalchemy import create_engine, text
+        from app.core.database import _ensure_additive_columns
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "legacy.db"
+            # 构造没有 target_weeks 的老 users 表
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, gender VARCHAR(10))"
+            )
+            conn.commit()
+            conn.close()
+
+            engine = create_engine(f"sqlite:///{db_path}")
+            try:
+                with engine.begin() as sync_conn:
+                    _ensure_additive_columns(sync_conn)
+                with engine.connect() as sync_conn:
+                    cols = {
+                        row[1]
+                        for row in sync_conn.execute(text("PRAGMA table_info(users)"))
+                    }
+                self.assertIn("target_weeks", cols)
+            finally:
+                engine.dispose()  # Windows 下释放文件锁，否则临时目录清理失败
 
 
 if __name__ == "__main__":

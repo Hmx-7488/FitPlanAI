@@ -8,6 +8,7 @@ class ProfileCreate(BaseModel):
     height: float  # cm
     weight: float  # kg
     target_weight: float  # kg
+    target_weeks: Optional[int] = None  # 目标周期（周），选填
     body_fat_rate: Optional[float] = None  # 体脂率，选填
     activity_level: str = "medium"  # low / medium / high / very_high
     diet_preference: str = "balanced"  # balanced / high_protein / low_carb / vegetarian
@@ -35,6 +36,7 @@ class ProfileUpdate(BaseModel):
     height: float | None = None
     weight: float | None = None
     target_weight: float | None = None
+    target_weeks: int | None = None
     body_fat_rate: float | None = None
     activity_level: str | None = None
     diet_preference: str | None = None
@@ -60,6 +62,7 @@ class ProfileResponse(BaseModel):
     height: float
     weight: float
     target_weight: float
+    target_weeks: Optional[int]
     body_fat_rate: Optional[float]
     activity_level: str
     diet_preference: str

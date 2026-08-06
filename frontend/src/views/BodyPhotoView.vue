@@ -7,7 +7,7 @@ import { ElMessage } from 'element-plus'
 import { AlertTriangle, Camera, Check, History, Maximize2, RefreshCw, Trash2 } from '@lucide/vue'
 import gsap from 'gsap'
 
-import { analyzeBodyPhoto, getBodyAnalysisHistory } from '../api'
+import { analyzeBodyPhoto, deleteBodyAnalysis, getBodyAnalysisHistory } from '../api'
 import type {
   BodyAnalysisHistoryItem,
   BodyMeasurements,
@@ -34,6 +34,7 @@ const globalDraft = (window as unknown as Record<string, BodyPhotoDraft>)[draftK
 const router = useRouter()
 const loading = ref(false)
 const historyLoading = ref(false)
+const deletingId = ref('')
 const selectedFiles = ref<Partial<Record<BodyView, File>>>({ ...globalDraft.files })
 const previewUrls = ref<Partial<Record<BodyView, string>>>({ ...globalDraft.previews })
 const measurements = ref<BodyMeasurements>({ ...globalDraft.measurements })
@@ -102,6 +103,21 @@ async function loadHistory() {
     historyItems.value = []
   } finally {
     historyLoading.value = false
+  }
+}
+
+async function removeHistory(analysisId: string) {
+  const userId = Number(localStorage.getItem('userId'))
+  if (!userId) return
+  if (!window.confirm('确定删除该条身材分析记录及其照片？删除后不可恢复。')) return
+  deletingId.value = analysisId
+  try {
+    await deleteBodyAnalysis(userId, analysisId)
+    historyItems.value = historyItems.value.filter(i => i.analysis_id !== analysisId)
+  } catch (err: any) {
+    ElMessage.error(err.response?.data?.detail || '删除失败')
+  } finally {
+    deletingId.value = ''
   }
 }
 
@@ -248,6 +264,7 @@ function metricUnit(key: string) {
           <div>
             <h2>阶段照片</h2>
             <p>照片数量可选。保持机位、距离、光线和衣物一致，历史对比才有意义。</p>
+            <p class="privacy-hint">照片仅保存在本应用本地存储，可在历史记录中随时删除。</p>
           </div>
           <span>{{ selectedCount }}/3 已上传</span>
         </div>
@@ -409,8 +426,18 @@ function metricUnit(key: string) {
           <span>{{ new Date(item.created_at).toLocaleDateString('zh-CN') }}</span>
           <b>{{ item.body_fat_estimate?.estimated_range || '未生成估算' }}</b>
           <small>{{ item.status === 'completed' ? '有效记录' : item.status === 'rejected' ? '照片被拒绝' : '降级参考' }}</small>
+          <button
+            type="button"
+            class="icon-btn history-delete"
+            title="删除该记录及照片"
+            :disabled="deletingId === item.analysis_id"
+            @click="removeHistory(item.analysis_id)"
+          >
+            <Trash2 :size="16" />
+          </button>
         </div>
       </div>
+      <p class="history-privacy">照片和分析记录仅保存在本应用的数据存储中，可随时删除，删除后不可恢复。</p>
     </section>
 
     <div v-if="enlargedImage" class="image-dialog" role="dialog" @click="enlargedImage = ''">
@@ -493,8 +520,13 @@ function metricUnit(key: string) {
 .result-actions { display: flex; gap: var(--space-3); }
 .history-section { margin-top: var(--space-6); }
 .history-list { display: grid; }
-.history-row { min-height: 44px; display: grid; grid-template-columns: 140px 1fr auto; align-items: center; gap: var(--space-3); border-top: 1px solid var(--color-border-subtle); font-size: var(--text-sm); }
+.history-row { min-height: 44px; display: grid; grid-template-columns: 140px 1fr auto auto; align-items: center; gap: var(--space-3); border-top: 1px solid var(--color-border-subtle); font-size: var(--text-sm); }
 .history-row small { color: var(--color-text-tertiary); }
+.history-delete { width: 32px; height: 32px; color: var(--color-text-tertiary); }
+.history-delete:hover:not(:disabled) { color: var(--color-warning); border-color: var(--color-warning); }
+.history-delete:disabled { opacity: 0.5; cursor: not-allowed; }
+.history-privacy { margin: var(--space-3) 0 0; font-size: var(--text-xs); color: var(--color-text-tertiary); line-height: var(--leading-normal); }
+.privacy-hint { margin-top: var(--space-1); font-size: var(--text-xs); color: var(--color-text-tertiary); }
 .image-dialog { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 5vh 5vw; background: rgb(0 0 0 / 78%); }
 .image-dialog img { max-width: 90vw; max-height: 90vh; object-fit: contain; }
 .image-dialog button { position: fixed; top: 20px; right: 24px; width: 42px; height: 42px; border: 0; border-radius: 50%; background: white; font-size: 28px; cursor: pointer; }
@@ -504,7 +536,7 @@ function metricUnit(key: string) {
   .view-card { min-height: 250px; }
   .page-header, .section-heading { align-items: flex-start; }
   .section-heading > span { white-space: normal; text-align: right; }
-  .history-row { grid-template-columns: 1fr auto; padding: 9px 0; }
+  .history-row { grid-template-columns: 1fr auto auto; padding: 9px 0; }
   .history-row small { grid-column: 1 / -1; }
   .result-actions { flex-direction: column; }
 }

@@ -12,6 +12,7 @@ async def create_profile(db: AsyncSession, data: ProfileCreate) -> User:
         height=data.height,
         weight=data.weight,
         target_weight=data.target_weight,
+        target_weeks=data.target_weeks,
         body_fat_rate=data.body_fat_rate,
         activity_level=data.activity_level,
         diet_preference=data.diet_preference,

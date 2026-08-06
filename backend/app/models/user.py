@@ -13,6 +13,7 @@ class User(Base):
     height: Mapped[float] = mapped_column(Float)
     weight: Mapped[float] = mapped_column(Float)
     target_weight: Mapped[float] = mapped_column(Float)
+    target_weeks: Mapped[int] = mapped_column(Integer, nullable=True)  # 目标周期（周）
     body_fat_rate: Mapped[float] = mapped_column(Float, nullable=True)
     activity_level: Mapped[str] = mapped_column(String(20), default="medium")
     diet_preference: Mapped[str] = mapped_column(String(50), default="balanced")

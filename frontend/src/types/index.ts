@@ -12,6 +12,7 @@ export interface UserProfile {
   height: number
   weight: number
   target_weight: number
+  target_weeks?: number | null
   body_fat_rate?: number
   activity_level: 'low' | 'medium' | 'high' | 'very_high'
   diet_preference: 'balanced' | 'high_protein' | 'low_carb' | 'vegetarian'
@@ -86,12 +87,22 @@ export interface CheckinResponse {
   feedback?: string
 }
 
+export interface CalorieAdjustment {
+  current_target: number
+  suggested_target: number
+  delta_kcal: number
+  weekly_change_pct: number
+  reason: string
+  basis: string
+}
+
 export interface ReviewResponse {
   user_id: number
   checkin_count: number
   recent_checkins: CheckinResponse[]
   review_summary: string
   next_day_advice: string
+  calorie_adjustment?: CalorieAdjustment | null
 }
 
 // Agent 追问响应

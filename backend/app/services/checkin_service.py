@@ -2,9 +2,16 @@ import json
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
-from app.models.user import Checkin, User
-from app.schemas.checkin import CheckinCreate, CheckinResponse, ReviewResponse
+from app.models.user import Checkin, Plan, User
+from app.schemas.checkin import (
+    CalorieAdjustment,
+    CheckinCreate,
+    CheckinResponse,
+    ReviewResponse,
+)
 from app.graph.workflow import run_review_workflow
+from app.services.adjustment_service import compute_calorie_adjustment
+from app.tools.calorie_tools import calc_bmr, calc_daily_calorie
 
 
 async def create_checkin(db: AsyncSession, data: CheckinCreate) -> CheckinResponse:
@@ -156,10 +163,62 @@ async def get_user_review(db: AsyncSession, user_id: int) -> ReviewResponse:
         for c in checkins
     ]
 
+    # 闭环：基于体重趋势计算热量调整草案（仅建议，确认后才写入）
+    adjustment = await _build_calorie_adjustment(db, user)
+
     return ReviewResponse(
         user_id=user_id,
         checkin_count=len(checkins),
         recent_checkins=recent_checkins,
         review_summary=review_result["review_summary"],
         next_day_advice=review_result["next_day_advice"],
+        calorie_adjustment=adjustment,
     )
+
+
+async def _build_calorie_adjustment(
+    db: AsyncSession, user: User
+) -> CalorieAdjustment | None:
+    """汇总当前热量目标与体重趋势，生成调整草案。"""
+    # 当前热量目标：优先取最新计划，否则按档案现算
+    plan_stmt = (
+        select(Plan)
+        .where(Plan.user_id == user.id)
+        .order_by(desc(Plan.created_at))
+        .limit(1)
+    )
+    plan = (await db.execute(plan_stmt)).scalar_one_or_none()
+    if plan:
+        current_target = plan.daily_calorie_target
+    else:
+        bmr = calc_bmr(
+            gender=user.gender,
+            weight=user.weight,
+            height=user.height,
+            age=user.age,
+        )
+        current_target = calc_daily_calorie(
+            bmr=bmr,
+            activity_level=user.activity_level or "medium",
+            goal_type=user.goal_type or "fat_loss",
+        )["target_calories"]
+
+    # 体重趋势：最近 60 次称重，按日期升序
+    weight_stmt = (
+        select(Checkin.date, Checkin.weight)
+        .where(Checkin.user_id == user.id, Checkin.weight.isnot(None))
+        .order_by(desc(Checkin.date))
+        .limit(60)
+    )
+    rows = (await db.execute(weight_stmt)).all()
+    points = sorted(
+        ((row.date, float(row.weight)) for row in rows if row.weight),
+        key=lambda item: item[0],
+    )
+
+    result = compute_calorie_adjustment(
+        goal_type=user.goal_type or "fat_loss",
+        weight_points=points,
+        current_target=current_target,
+    )
+    return CalorieAdjustment(**result) if result else None

@@ -52,6 +52,18 @@ export async function generatePlan(userId: number): Promise<PlanResponse> {
   return res.data
 }
 
+// 用户确认后写入新的热量目标（复盘调整草案的确认入口）
+export async function applyCalorieAdjustment(
+  userId: number,
+  dailyCalorieTarget: number
+): Promise<PlanResponse> {
+  const res = await api.post<PlanResponse>('/plan/adjust-calories', {
+    user_id: userId,
+    daily_calorie_target: dailyCalorieTarget,
+  })
+  return res.data
+}
+
 // 每日打卡
 export async function createCheckin(data: CheckinData): Promise<CheckinResponse> {
   const res = await api.post<CheckinResponse>('/checkin/create', data)
@@ -222,6 +234,14 @@ export async function getBodyAnalysisHistory(
 ): Promise<BodyAnalysisHistoryItem[]> {
   const res = await api.get<BodyAnalysisHistoryItem[]>(`/body/history/${userId}?limit=${limit}`)
   return res.data
+}
+
+// 删除身材分析记录及其照片（隐私删除入口）
+export async function deleteBodyAnalysis(
+  userId: number,
+  analysisId: string,
+): Promise<void> {
+  await api.delete(`/body/history/${userId}/${analysisId}`)
 }
 
 // AI 动作分析

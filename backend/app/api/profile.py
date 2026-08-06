@@ -16,6 +16,7 @@ def _user_to_response(user) -> ProfileResponse:
         height=user.height,
         weight=user.weight,
         target_weight=user.target_weight,
+        target_weeks=user.target_weeks,
         body_fat_rate=user.body_fat_rate,
         activity_level=user.activity_level,
         diet_preference=user.diet_preference,

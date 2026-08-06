@@ -593,3 +593,44 @@ async def get_body_analysis_history(
     )
     records = (await db.execute(query)).scalars().all()
     return [_history_item(record) for record in records]
+
+
+@router.delete("/history/{user_id}/{analysis_id}")
+async def delete_body_analysis(
+    user_id: int,
+    analysis_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """删除一条身材分析记录及其照片文件（隐私删除入口）。"""
+    try:
+        record_id = int(analysis_id.removeprefix("body_"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="无效的 analysis_id")
+
+    record = await db.get(BodyAnalysis, record_id)
+    if not record or record.user_id != user_id:
+        raise HTTPException(status_code=404, detail="记录不存在")
+
+    photo_urls = _json_load(record.photo_urls_json, {})
+    await db.delete(record)
+    await db.commit()
+
+    # 清理照片文件：仅限身材上传目录内，防路径穿越
+    removed_files = 0
+    upload_root = UPLOAD_DIR.resolve()
+    for url in photo_urls.values():
+        filename = str(url).rsplit("/", 1)[-1]
+        if not filename:
+            continue
+        candidate = (UPLOAD_DIR / filename).resolve()
+        if candidate.parent == upload_root and candidate.exists():
+            candidate.unlink()
+            removed_files += 1
+
+    logger.info(
+        "Body analysis deleted: user_id=%s analysis_id=%s removed_files=%s",
+        user_id,
+        analysis_id,
+        removed_files,
+    )
+    return {"deleted": True, "analysis_id": analysis_id, "removed_files": removed_files}

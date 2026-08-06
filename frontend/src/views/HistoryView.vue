@@ -2,7 +2,7 @@
 import { ref, onMounted, nextTick, useTemplateRef } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { getCheckinHistory, getReview } from '../api'
+import { getCheckinHistory, getReview, applyCalorieAdjustment } from '../api'
 import type { CheckinResponse, ReviewResponse } from '../types'
 import { sanitizeHtml } from '../utils/sanitize'
 import gsap from 'gsap'
@@ -75,6 +75,34 @@ function formatMd(text: string): string {
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/#{1,3}\s(.+)/g, '<h4>$1</h4>')
   return sanitizeHtml(rendered)
+}
+
+// 热量调整草案：应用（确认写入）或忽略
+const applyingAdjustment = ref(false)
+
+async function applyAdjustment() {
+  const adj = review.value?.calorie_adjustment
+  if (!adj) return
+  const userId = Number(localStorage.getItem('userId'))
+  applyingAdjustment.value = true
+  try {
+    await applyCalorieAdjustment(userId, adj.suggested_target)
+    ElMessage.success(`热量目标已调整为 ${adj.suggested_target} kcal`)
+    if (review.value) {
+      review.value = { ...review.value, calorie_adjustment: null }
+      saveReviewToStorage(review.value)
+    }
+  } catch (err: any) {
+    ElMessage.error(err.response?.data?.detail || '调整失败，请稍后重试')
+  } finally {
+    applyingAdjustment.value = false
+  }
+}
+
+function dismissAdjustment() {
+  if (!review.value) return
+  review.value = { ...review.value, calorie_adjustment: null }
+  saveReviewToStorage(review.value)
 }
 
 onMounted(() => {
@@ -166,6 +194,32 @@ onMounted(() => {
           <span>共 {{ review.checkin_count }} 天打卡记录</span>
         </div>
 
+        <!-- 热量调整草案：基于体重趋势的闭环建议，确认后才写入计划 -->
+        <div class="adjust-card" v-if="review.calorie_adjustment">
+          <div class="adjust-main">
+            <h3 class="review-card-title">热量目标调整建议</h3>
+            <div class="adjust-targets">
+              <span class="adjust-current">{{ review.calorie_adjustment.current_target }}</span>
+              <span class="adjust-arrow">→</span>
+              <span class="adjust-suggested">{{ review.calorie_adjustment.suggested_target }} kcal</span>
+              <span
+                class="adjust-delta"
+                :class="review.calorie_adjustment.delta_kcal > 0 ? 'adjust-delta--up' : 'adjust-delta--down'"
+              >
+                {{ review.calorie_adjustment.delta_kcal > 0 ? '+' : '' }}{{ review.calorie_adjustment.delta_kcal }}
+              </span>
+            </div>
+            <p class="adjust-reason">{{ review.calorie_adjustment.reason }}</p>
+            <p class="adjust-basis">{{ review.calorie_adjustment.basis }}</p>
+          </div>
+          <div class="adjust-actions">
+            <button class="btn btn-sm btn-primary" :disabled="applyingAdjustment" @click="applyAdjustment">
+              {{ applyingAdjustment ? '应用中...' : '应用调整' }}
+            </button>
+            <button class="btn btn-sm btn-ghost" @click="dismissAdjustment">忽略</button>
+          </div>
+        </div>
+
         <div class="review-grid">
           <div class="review-card">
             <h3 class="review-card-title">复盘总结</h3>
@@ -185,6 +239,89 @@ onMounted(() => {
 .history-page {
   max-width: 800px;
   margin: 0 auto;
+}
+
+/* 热量调整草案卡片 */
+.adjust-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  margin-bottom: var(--space-5);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-md);
+  background: var(--color-accent-subtle);
+}
+
+.adjust-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.adjust-targets {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: var(--space-2) 0;
+}
+
+.adjust-current {
+  font-size: var(--text-lg);
+  color: var(--color-text-tertiary);
+  text-decoration: line-through;
+}
+
+.adjust-arrow {
+  color: var(--color-text-tertiary);
+}
+
+.adjust-suggested {
+  font-size: var(--text-xl);
+  font-weight: 800;
+  color: var(--color-accent);
+}
+
+.adjust-delta {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.adjust-delta--up {
+  color: var(--color-warning);
+}
+
+.adjust-delta--down {
+  color: var(--color-accent);
+}
+
+.adjust-reason {
+  font-size: var(--text-sm);
+  color: var(--color-text-primary);
+  line-height: var(--leading-normal);
+  margin-bottom: var(--space-1);
+}
+
+.adjust-basis {
+  font-size: var(--text-sm);
+  color: var(--color-text-tertiary);
+  line-height: var(--leading-normal);
+}
+
+.adjust-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+@media (max-width: 480px) {
+  .adjust-card {
+    flex-direction: column;
+  }
+  .adjust-actions {
+    flex-direction: row;
+  }
 }
 
 .page-header {

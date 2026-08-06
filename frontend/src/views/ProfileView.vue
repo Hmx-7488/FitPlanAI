@@ -44,6 +44,7 @@ const form = ref<UserProfile>({
   height: 175,
   weight: 80,
   target_weight: 70,
+  target_weeks: 8,
   body_fat_rate: undefined,
   activity_level: 'medium',
   diet_preference: 'balanced',
@@ -113,6 +114,7 @@ onMounted(async () => {
       form.value.height = existing.height
       form.value.weight = existing.weight
       form.value.target_weight = existing.target_weight
+      form.value.target_weeks = existing.target_weeks ?? null
       form.value.body_fat_rate = existing.body_fat_rate ?? undefined
       form.value.activity_level = existing.activity_level
       form.value.diet_preference = existing.diet_preference
@@ -266,6 +268,19 @@ function goToAnalysis() {
         <div class="form-field">
           <label class="field-label">目标体重 (kg)</label>
           <input type="number" v-model.number="form.target_weight" min="30" max="200" step="0.5" class="input" />
+        </div>
+        <div class="form-field">
+          <label class="field-label">目标周期 <span class="field-optional">选填，用于阶段调整</span></label>
+          <div class="radio-group">
+            <button
+              v-for="w in [4, 8, 12, 16]"
+              :key="w"
+              class="radio-btn radio-btn--num"
+              :class="{ 'radio-btn--active': form.target_weeks === w }"
+              @click="form.target_weeks = form.target_weeks === w ? null : w"
+              type="button"
+            >{{ w }}周</button>
+          </div>
         </div>
         <!-- 体脂率：折叠在高级选项中，大部分用户不需要手动填 -->
         <div class="form-field form-field--wide">
@@ -601,6 +616,7 @@ function goToAnalysis() {
           <span class="step-icon">&#128247;</span>
           <h2>上传身材照片（可选）</h2>
           <p>AI 会分析照片估算体脂率，让计划更精准。不上传也可以。</p>
+          <p class="privacy-hint">照片仅保存在本应用本地存储，可在身材分析页历史记录中随时删除。</p>
         </div>
 
         <div class="upload-area" @click="($refs.bodyFileInput as HTMLInputElement).click()">
@@ -1007,6 +1023,7 @@ function goToAnalysis() {
 .step-icon { font-size: 48px; display: block; margin-bottom: var(--space-3); opacity: 0.5; }
 .photo-step-header h2 { font-size: var(--text-xl); font-weight: 700; margin-bottom: var(--space-2); }
 .photo-step-header p { color: var(--color-text-secondary); }
+.photo-step-header .privacy-hint { margin-top: var(--space-1); font-size: var(--text-sm); color: var(--color-text-tertiary); }
 
 .upload-area {
   border: 2px dashed var(--color-border);

@@ -25,9 +25,21 @@ class CheckinResponse(BaseModel):
         from_attributes = True
 
 
+class CalorieAdjustment(BaseModel):
+    """热量目标调整草案（仅建议，需用户确认后才写入计划）"""
+
+    current_target: int
+    suggested_target: int
+    delta_kcal: int
+    weekly_change_pct: float  # 每周体重变化百分比
+    reason: str
+    basis: str  # 调整依据说明
+
+
 class ReviewResponse(BaseModel):
     user_id: int
     checkin_count: int
     recent_checkins: list[CheckinResponse]
     review_summary: str  # AI 复盘总结
     next_day_advice: str  # 次日调整建议
+    calorie_adjustment: Optional[CalorieAdjustment] = None  # 热量调整草案

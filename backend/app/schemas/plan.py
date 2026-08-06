@@ -1,10 +1,17 @@
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class PlanGenerateRequest(BaseModel):
     user_id: int
+
+
+class CalorieAdjustRequest(BaseModel):
+    """用户确认后的热量目标调整（写入最新计划）"""
+
+    user_id: int
+    daily_calorie_target: int = Field(ge=800, le=5000)
 
 
 class CalorieInfo(BaseModel):
