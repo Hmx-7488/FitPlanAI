@@ -39,6 +39,7 @@ class PlanResponse(BaseModel):
     calorie_info: CalorieInfo
     macros: MacrosInfo
     meal_plan: str
+    meal_plan_json: Optional[str] = None  # 结构化饮食计划
     workout_plan: str
     workout_plan_json: Optional[str] = None  # 结构化训练计划
     summary: str

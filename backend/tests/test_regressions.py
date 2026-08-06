@@ -1639,5 +1639,84 @@ class ExerciseCandidateTests(unittest.TestCase):
         self.assertNotIn("0025", ids)  # advanced excluded for beginner
 
 
+class FoodCandidateTests(unittest.TestCase):
+    """Meal plan candidate pool: backend filters by allergies/forbidden foods."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        db_path = Path(self.temp_dir.name) / "food-test.db"
+        self.engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+        self.session_factory = async_sessionmaker(
+            self.engine, expire_on_commit=False
+        )
+
+        async def prepare():
+            async with self.engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            async with self.session_factory() as session:
+                from app.models.user import Food
+
+                session.add_all([
+                    Food(id=1, name_zh="鸡胸肉", aliases='["鸡胸"]', category="protein",
+                         calories_kcal=133, protein_g=31, carbs_g=0, fat_g=1.2,
+                         fiber_g=0, sodium_mg=63, default_portion_g=150,
+                         default_portion_name="一块", diet_tags='["high_protein"]',
+                         common_dishes='["煎鸡胸"]'),
+                    Food(id=2, name_zh="虾", aliases='["虾仁"]', category="protein",
+                         calories_kcal=87, protein_g=18.6, carbs_g=0, fat_g=0.8,
+                         fiber_g=0, sodium_mg=165, default_portion_g=100,
+                         default_portion_name="一份", diet_tags='["high_protein"]',
+                         common_dishes='["白灼虾"]'),
+                    Food(id=3, name_zh="米饭", aliases='[]', category="carb",
+                         calories_kcal=116, protein_g=2.6, carbs_g=25.9, fat_g=0.3,
+                         fiber_g=0.4, sodium_mg=2, default_portion_g=200,
+                         default_portion_name="一碗", diet_tags='[]',
+                         common_dishes='["炒饭"]'),
+                ])
+                await session.commit()
+
+        asyncio.run(prepare())
+
+    def tearDown(self):
+        asyncio.run(self.engine.dispose())
+        self.temp_dir.cleanup()
+
+    def test_allergy_filters_shrimp(self):
+        from app.graph.workflow import _query_food_candidates
+
+        profile = {
+            "forbidden_foods": [],
+            "allergies": ["虾"],
+        }
+        with patch("app.graph.workflow.async_session", self.session_factory):
+            candidates = asyncio.run(_query_food_candidates(profile, {}))
+
+        names = {c["name"] for c in candidates}
+        self.assertIn("鸡胸肉", names)
+        self.assertIn("米饭", names)
+        self.assertNotIn("虾", names)  # filtered by allergy
+
+    def test_no_restrictions_returns_all(self):
+        from app.graph.workflow import _query_food_candidates
+
+        profile = {"forbidden_foods": [], "allergies": []}
+        with patch("app.graph.workflow.async_session", self.session_factory):
+            candidates = asyncio.run(_query_food_candidates(profile, {}))
+
+        self.assertEqual(len(candidates), 3)
+
+    def test_candidates_include_nutrition_data(self):
+        from app.graph.workflow import _query_food_candidates
+
+        profile = {"forbidden_foods": [], "allergies": []}
+        with patch("app.graph.workflow.async_session", self.session_factory):
+            candidates = asyncio.run(_query_food_candidates(profile, {}))
+
+        chicken = next(c for c in candidates if c["name"] == "鸡胸肉")
+        self.assertEqual(chicken["calories_kcal"], 133)
+        self.assertEqual(chicken["protein_g"], 31)
+        self.assertEqual(chicken["default_portion_g"], 150)
+
+
 if __name__ == "__main__":
     unittest.main()

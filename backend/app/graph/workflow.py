@@ -266,85 +266,197 @@ def calc_calorie_node(state: AgentState) -> dict:
 
 
 def generate_meal_plan(state: AgentState) -> dict:
-    """生成饮食建议，根据目标类型和饮食习惯分支"""
-    llm = get_llm(max_tokens=1500)
+    """Generate structured meal plan from food candidates with nutrition verification.
+
+    LLM arranges meals using real per-100g nutrition data from the food database.
+    Backend verifies portion_g * per_100g / 100 against daily macro targets.
+    """
+    llm = get_llm(max_tokens=2000)
     profile = state["user_profile"]
     macros = state["macros"]
     calorie_info = state["calorie_info"]
-    food_knowledge = state["food_knowledge"]
-    diet_knowledge = state["diet_knowledge"]
     goal_type = state.get("goal_type", "fat_loss")
+    food_candidates = state.get("food_candidates", [])
 
-    forbidden = ", ".join(profile.get("forbidden_foods", [])) or "无"
+    forbidden = ", ".join(profile.get("forbidden_foods", [])) or "none"
     preference = profile.get("diet_preference", "balanced")
-
-    # 中国饮食习惯字段
-    region_map = {
-        "south_china": "南方口味",
-        "north_china": "北方口味",
-        "sichuan": "川湘口味",
-        "cantonese": "粤式口味",
-        "balanced": "不限地域",
-    }
     scenario_map = {
-        "home_cooking": "自己做饭",
-        "takeout": "点外卖为主",
-        "canteen": "食堂为主",
-        "convenience_store": "便利店为主",
+        "home_cooking": "home cooking",
+        "takeout": "takeout/delivery",
+        "canteen": "canteen/cafeteria",
+        "convenience_store": "convenience store",
     }
-    region = region_map.get(profile.get("region_preference", "balanced"), "不限地域")
-    scenario = scenario_map.get(profile.get("meal_scenario", "home_cooking"), "自己做饭")
+    scenario = scenario_map.get(profile.get("meal_scenario", "home_cooking"), "home cooking")
     prep_time = profile.get("prep_time_limit_minutes", 30)
 
-    diet_context = ""
-    if region != "不限地域" or scenario != "自己做饭":
-        diet_context = f"""
-饮食习惯：{region}，{scenario}，备餐时间限制{prep_time}分钟。
-要求：菜谱要贴近{scenario}的场景。如果备餐时间短（{prep_time}分钟以内），优先推荐快手菜。
-如果用户主要吃外卖/食堂/便利店，给出具体点餐建议（如"食堂两荤一素，少油少汁"、"外卖选轻食沙拉或少油盖饭"）。"""
+    # Build candidate pool text with per-100g nutrition
+    pool_lines = []
+    for f in food_candidates:
+        pool_lines.append(
+            f"[{f['id']}] {f['name']} ({f['category']}) "
+            f"per100g: {f['calories_kcal']}kcal P{f['protein_g']}g C{f['carbs_g']}g F{f['fat_g']}g "
+            f"default_portion: {f['default_portion_g']}g ({f['default_portion_name']})"
+        )
+    pool_text = "\n".join(pool_lines) if pool_lines else "(empty pool, recommend basic foods)"
+
+    target_p = macros.get("protein_g", 150)
+    target_c = macros.get("carbs_g", 180)
+    target_f = macros.get("fat_g", 55)
+    target_kcal = calorie_info.get("target_calories", 1850)
 
     if goal_type == "muscle_gain":
-        goal_desc = f"""用户目标：增肌。每日热量盈余约{abs(calorie_info['deficit'])}kcal，蛋白质需求高（{macros['protein_g']}g）。
-饮食策略：保证蛋白质和训练日前后碳水，增加正餐和加餐安排，避免脏增肌。
-要求：每个方案都要有加餐，蛋白质来源丰富。"""
+        goal_desc = "muscle gain: ensure protein and training-day carbs, add snacks between meals"
     else:
-        goal_desc = f"""用户目标：减脂。每日热量缺口{calorie_info['deficit']}kcal。
-饮食策略：高蛋白保肌，控制油脂和精制糖，餐食偏高蛋白、高纤维、适量碳水。
-要求：控制总热量，避免高热量零食。"""
+        goal_desc = "fat loss: high protein for muscle retention, control oil and sugar, high fiber"
 
-    prompt = f"""你是营养师。根据以下信息生成3天饮食计划（不需要7天，3天即可展示模式）。
+    prompt = f"""You are a nutritionist. Using the candidate food pool (with per-100g nutrition data), create a 1-day meal plan with exact gram portions that matches the user daily macro targets.
 
-用户：{profile['gender']}，{profile['age']}岁，{profile['height']}cm，{profile['weight']}kg→目标{profile['target_weight']}kg
-偏好：{preference}，忌口：{forbidden}
-每日目标：热量{calorie_info['target_calories']}kcal，蛋白{macros['protein_g']}g，碳水{macros['carbs_g']}g，脂肪{macros['fat_g']}g
+User: {profile.get('gender','')}, {profile.get('age','')}yo, {profile.get('weight','')}kg -> target {profile.get('target_weight','')}kg
+Goal: {goal_type}
+Diet preference: {preference}
+Forbidden/allergies: {forbidden}
+Scenario: {scenario}, prep time limit: {prep_time}min
 
-{goal_desc}
-{diet_context}
+Daily targets (MUST match within +/-15%):
+- Calories: {target_kcal} kcal
+- Protein: {target_p}g
+- Carbs: {target_c}g
+- Fat: {target_f}g
 
-参考知识：
-{food_knowledge[:500]}
+Strategy: {goal_desc}
 
-{diet_knowledge[:300]}
+Candidate food pool (select food_id from this list, use per-100g data to calculate portions):
+{pool_text}
 
-输出格式：
-**第1天/第2天/第3天**
-- 早餐：菜品 + 大约热量 + 主要食材用量
-- 午餐：菜品 + 大约热量 + 主要食材用量
-- 晚餐：菜品 + 大约热量 + 主要食材用量
-- 加餐：按目标安排，可选时明确标注
+Output strict JSON only (no markdown, no extra text):
+{{
+  "meals": [
+    {{
+      "meal_type": "breakfast",
+      "items": [
+        {{"food_id": 20, "name": "oats", "portion_g": 40, "calories": 151, "protein_g": 5.2, "carbs_g": 26.8, "fat_g": 2.7}}
+      ],
+      "meal_total": {{"calories": 300, "protein_g": 20, "carbs_g": 35, "fat_g": 8}}
+    }},
+    {{
+      "meal_type": "lunch",
+      "items": [],
+      "meal_total": {{"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0}}
+    }},
+    {{
+      "meal_type": "dinner",
+      "items": [],
+      "meal_total": {{"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0}}
+    }}
+  ],
+  "daily_total": {{"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0}},
+  "target_match": {{"protein_pct": 0, "carbs_pct": 0, "fat_pct": 0, "calories_pct": 0}},
+  "snack_suggestion": "optional snack if needed",
+  "tips": ["tip1", "tip2"]
+}}
 
-**可替代食材**
-- 为蛋白质、主食、蔬菜、健康脂肪分别提供 3-5 个等量或近似营养替代项
-- 标明替换比例或大致克数，避开用户忌口和过敏食材
+Rules:
+1. Select food_id ONLY from the candidate pool
+2. For each item, calculate nutrition = per_100g_value * portion_g / 100
+3. Each meal should have 2-4 items
+4. Sum all meals to get daily_total
+5. target_match = daily_total / target * 100 for each macro
+6. Aim for target_match between 85-115 for each macro
+7. If pool is empty, recommend basic foods with food_id 0
+8. Include a snack if user goal is muscle_gain or if calorie target is high
+"""
 
-**3天食材清单**
-- 汇总 3 天所需食材，按蛋白质、主食、蔬果、调味/其他分类
-- 合并重复食材并给出总用量或便于采购的数量
+    try:
+        response = llm.invoke([HumanMessage(content=prompt)])
+        raw = response.content.strip()
+        json_start = raw.find("{")
+        json_end = raw.rfind("}") + 1
+        if json_start >= 0 and json_end > json_start:
+            raw = raw[json_start:json_end]
+        plan_data = json.loads(raw)
 
-最后附：烹饪建议（3条）+ 饮食注意事项（3条）。简洁、具体、可执行，不要冗长解释。"""
+        # Backend verification: recalculate nutrition from food data
+        valid_foods = {f["id"]: f for f in food_candidates}
+        for meal in plan_data.get("meals", []):
+            for item in meal.get("items", []):
+                fid = item.get("food_id")
+                portion = item.get("portion_g", 0)
+                if fid in valid_foods and portion > 0:
+                    food = valid_foods[fid]
+                    item["calories"] = round(food["calories_kcal"] * portion / 100, 1)
+                    item["protein_g"] = round(food["protein_g"] * portion / 100, 1)
+                    item["carbs_g"] = round(food["carbs_g"] * portion / 100, 1)
+                    item["fat_g"] = round(food["fat_g"] * portion / 100, 1)
+                    item["is_from_database"] = True
+                else:
+                    item["is_from_database"] = False
 
-    response = llm.invoke([HumanMessage(content=prompt)])
-    return {"meal_plan": response.content}
+            # Recalculate meal totals
+            mt = {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0}
+            for item in meal.get("items", []):
+                mt["calories"] += item.get("calories", 0)
+                mt["protein_g"] += item.get("protein_g", 0)
+                mt["carbs_g"] += item.get("carbs_g", 0)
+                mt["fat_g"] += item.get("fat_g", 0)
+            meal["meal_total"] = {k: round(v, 1) for k, v in mt.items()}
+
+        # Recalculate daily total
+        dt = {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0}
+        for meal in plan_data.get("meals", []):
+            mt = meal.get("meal_total", {})
+            dt["calories"] += mt.get("calories", 0)
+            dt["protein_g"] += mt.get("protein_g", 0)
+            dt["carbs_g"] += mt.get("carbs_g", 0)
+            dt["fat_g"] += mt.get("fat_g", 0)
+        plan_data["daily_total"] = {k: round(v, 1) for k, v in dt.items()}
+
+        # Recalculate target match
+        tm = {}
+        tm["protein_pct"] = round(dt["protein_g"] / target_p * 100, 1) if target_p else 0
+        tm["carbs_pct"] = round(dt["carbs_g"] / target_c * 100, 1) if target_c else 0
+        tm["fat_pct"] = round(dt["fat_g"] / target_f * 100, 1) if target_f else 0
+        tm["calories_pct"] = round(dt["calories"] / target_kcal * 100, 1) if target_kcal else 0
+        plan_data["target_match"] = tm
+
+    except Exception:
+        plan_data = {
+            "meals": [],
+            "daily_total": {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0},
+            "target_match": {},
+            "snack_suggestion": "",
+            "tips": ["meal plan generation error, please retry"],
+        }
+
+    meal_plan_json = json.dumps(plan_data, ensure_ascii=False)
+
+    # Generate text fallback
+    text_lines = []
+    for meal in plan_data.get("meals", []):
+        items_text = ", ".join(
+            f"{i.get('name','?')} {i.get('portion_g',0)}g" for i in meal.get("items", [])
+        )
+        mt = meal.get("meal_total", {})
+        text_lines.append(
+            f"**{meal.get('meal_type','')}** {items_text} "
+            f"({mt.get('calories',0)}kcal P{mt.get('protein_g',0)}g C{mt.get('carbs_g',0)}g F{mt.get('fat_g',0)}g)"
+        )
+    dt = plan_data.get("daily_total", {})
+    tm = plan_data.get("target_match", {})
+    text_lines.append(
+        f"\n**Daily Total**: {dt.get('calories',0)}kcal "
+        f"P{dt.get('protein_g',0)}g C{dt.get('carbs_g',0)}g F{dt.get('fat_g',0)}g"
+    )
+    text_lines.append(
+        f"**Target Match**: Protein {tm.get('protein_pct',0)}% "
+        f"Carbs {tm.get('carbs_pct',0)}% Fat {tm.get('fat_pct',0)}%"
+    )
+    meal_plan_text = "\n".join(text_lines) if text_lines else "meal plan generation failed"
+
+    return {
+        "meal_plan": meal_plan_text,
+        "meal_plan_json": meal_plan_json,
+    }
+
 
 
 def generate_workout_plan(state: AgentState) -> dict:
@@ -695,6 +807,43 @@ async def _query_exercise_candidates(user_profile: dict) -> list[dict]:
     return all_candidates
 
 
+
+
+async def _query_food_candidates(user_profile: dict, macros: dict) -> list[dict]:
+    """Query food database for candidate pool based on diet preference and allergies."""
+    from app.models.user import Food
+    from sqlalchemy import select, or_
+
+    forbidden = user_profile.get("forbidden_foods", [])
+    allergies = user_profile.get("allergies", [])
+    exclude_keywords = forbidden + allergies
+
+    async with async_session() as session:
+        stmt = select(Food).order_by(Food.category, Food.id)
+        result = await session.execute(stmt)
+        foods = result.scalars().all()
+
+    candidates = []
+    for food in foods:
+        # Filter out forbidden/allergy foods by name and aliases
+        food_text = food.name_zh + " " + (food.aliases or "")
+        if any(kw.lower() in food_text.lower() for kw in exclude_keywords if kw):
+            continue
+        candidates.append({
+            "id": food.id,
+            "name": food.name_zh,
+            "category": food.category,
+            "calories_kcal": food.calories_kcal,
+            "protein_g": food.protein_g,
+            "carbs_g": food.carbs_g,
+            "fat_g": food.fat_g,
+            "fiber_g": food.fiber_g,
+            "default_portion_g": food.default_portion_g,
+            "default_portion_name": food.default_portion_name,
+        })
+    return candidates
+
+
 async def run_workflow(user_profile: dict) -> dict:
     """执行完整工作流。返回 dict 必含 status 字段：
     - status="plan"：计划生成成功
@@ -702,6 +851,27 @@ async def run_workflow(user_profile: dict) -> dict:
     """
     # Query exercise candidates before running graph
     exercise_candidates = await _query_exercise_candidates(user_profile)
+
+    # Query food candidates (needs macros, so calculate first)
+    from app.tools.calorie_tools import calc_bmr, calc_daily_calorie, calc_macros
+    bmr = calc_bmr(
+        gender=user_profile.get("gender", "male"),
+        weight=user_profile.get("weight", 70),
+        height=user_profile.get("height", 170),
+        age=user_profile.get("age", 30),
+    )
+    calorie_info = calc_daily_calorie(
+        bmr=bmr,
+        activity_level=user_profile.get("activity_level", "medium"),
+        goal_type=user_profile.get("goal_type", "fat_loss"),
+    )
+    macros = calc_macros(
+        calorie_info["target_calories"],
+        user_profile.get("weight", 70),
+        user_profile.get("activity_level", "medium"),
+        user_profile.get("goal_type", "fat_loss"),
+    )
+    food_candidates = await _query_food_candidates(user_profile, macros)
 
     graph = build_graph()
 
@@ -721,9 +891,11 @@ async def run_workflow(user_profile: dict) -> dict:
         "risk_knowledge": "",
         "knowledge_citations": [],
         "meal_plan": "",
+        "meal_plan_json": "",
         "workout_plan": "",
         "workout_plan_json": "",
         "exercise_candidates": exercise_candidates,
+        "food_candidates": food_candidates,
         "risk_warnings": [],
         "summary": "",
     }
@@ -745,6 +917,8 @@ async def run_workflow(user_profile: dict) -> dict:
         "calorie_info": result["calorie_info"],
         "macros": result["macros"],
         "meal_plan": result["meal_plan"],
+        "meal_plan": result["meal_plan"],
+        "meal_plan_json": result.get("meal_plan_json", ""),
         "workout_plan": result["workout_plan"],
         "workout_plan_json": result.get("workout_plan_json", ""),
         "summary": result["summary"],

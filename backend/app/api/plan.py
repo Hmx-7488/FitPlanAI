@@ -44,6 +44,7 @@ def _to_plan_response(plan: Plan) -> PlanResponse:
             water_ml=macros.get("water_ml", 0),
         ),
         meal_plan=plan.meal_plan,
+        meal_plan_json=plan.meal_plan_json if plan.meal_plan_json else None,
         workout_plan=plan.workout_plan,
         workout_plan_json=plan.workout_plan_json if plan.workout_plan_json else None,
         summary=plan.summary,

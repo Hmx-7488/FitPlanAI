@@ -44,6 +44,7 @@ class Plan(Base):
     calorie_info_json: Mapped[str] = mapped_column(Text, default="{}")
     macros_json: Mapped[str] = mapped_column(Text, default="{}")
     meal_plan: Mapped[str] = mapped_column(Text)
+    meal_plan_json: Mapped[str] = mapped_column(Text, default="")  # 结构化饮食计划
     workout_plan: Mapped[str] = mapped_column(Text)
     workout_plan_json: Mapped[str] = mapped_column(Text, default="")  # 结构化训练计划
     summary: Mapped[str] = mapped_column(Text, default="")
