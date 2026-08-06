@@ -17,7 +17,9 @@ from app.api.dashboard import router as dashboard_router
 from app.api.knowledge import router as knowledge_router
 from app.api.chat import router as chat_router
 from app.api.exercises import router as exercises_router
+from app.api.foods import router as foods_router
 from app.services.exercise_service import import_exercises_if_empty
+from app.services.food_service import import_foods_if_empty
 
 UPLOAD_DIR = Path(__file__).parent.parent / "data" / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -44,6 +46,10 @@ async def lifespan(app: FastAPI):
         imported = await import_exercises_if_empty(session)
         if imported:
             logger.info("Exercise dataset imported: %d records.", imported)
+        # 首次启动自动导入食物热量库
+        food_imported = await import_foods_if_empty(session)
+        if food_imported:
+            logger.info("Food database imported: %d records.", food_imported)
     yield
 
 
@@ -74,6 +80,7 @@ app.include_router(dashboard_router, prefix="/api/dashboard", tags=["Dashboard"]
 app.include_router(knowledge_router, prefix="/api/knowledge", tags=["知识库"])
 app.include_router(chat_router, prefix="/api/chat", tags=["聊天 Agent"])
 app.include_router(exercises_router, prefix="/api/exercises", tags=["动作库"])
+app.include_router(foods_router, prefix="/api/foods", tags=["食物库"])
 
 # 静态文件：上传的图片
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")

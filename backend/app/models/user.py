@@ -165,6 +165,29 @@ class Exercise(Base):
     gif_path: Mapped[str] = mapped_column(String(200), default="")  # 动图文件名
 
 
+class Food(Base):
+    """食物热量库：自建常见中餐食材营养数据。
+
+    首次启动时从 data/foods/foods_zh.json 自动导入。
+    """
+    __tablename__ = "foods"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name_zh: Mapped[str] = mapped_column(String(100), index=True)
+    aliases: Mapped[str] = mapped_column(Text, default="[]")  # JSON array
+    category: Mapped[str] = mapped_column(String(20), index=True)  # protein/carb/vegetable/fruit/fat/dairy/beverage
+    calories_kcal: Mapped[float] = mapped_column(Float)  # 每 100g
+    protein_g: Mapped[float] = mapped_column(Float)
+    carbs_g: Mapped[float] = mapped_column(Float)
+    fat_g: Mapped[float] = mapped_column(Float)
+    fiber_g: Mapped[float] = mapped_column(Float, default=0)
+    sodium_mg: Mapped[float] = mapped_column(Float, default=0)
+    default_portion_g: Mapped[float] = mapped_column(Float, default=100)
+    default_portion_name: Mapped[str] = mapped_column(String(50), default="")
+    diet_tags: Mapped[str] = mapped_column(Text, default="[]")  # JSON array
+    common_dishes: Mapped[str] = mapped_column(Text, default="[]")  # JSON array
+
+
 class BodyAnalysis(Base):
     """Persisted body-composition analysis and comparison context."""
     __tablename__ = "body_analyses"
