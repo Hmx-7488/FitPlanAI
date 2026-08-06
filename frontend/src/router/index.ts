@@ -54,6 +54,11 @@ const router = createRouter({
       component: () => import('../views/MealView.vue'),
     },
     {
+      path: '/daily',
+      name: 'daily',
+      component: () => import('../views/DailyView.vue'),
+    },
+    {
       path: '/chat',
       name: 'chat',
       component: () => import('../views/ChatView.vue'),

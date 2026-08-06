@@ -37,15 +37,8 @@ onMounted(() => {
         </router-link>
         <nav class="nav">
           <router-link to="/" class="nav-link" exact-active-class="nav-link--active">首页</router-link>
-          <router-link to="/profile" class="nav-link" active-class="nav-link--active">建档</router-link>
-          <router-link to="/analysis" class="nav-link" active-class="nav-link--active">分析</router-link>
           <router-link to="/plan" class="nav-link" active-class="nav-link--active">计划</router-link>
-          <router-link to="/food" class="nav-link" active-class="nav-link--active">食材</router-link>
-          <router-link to="/meal" class="nav-link" active-class="nav-link--active">餐食</router-link>
-          <router-link to="/body-photo" class="nav-link" active-class="nav-link--active">身材</router-link>
-          <router-link to="/pose" class="nav-link" active-class="nav-link--active">动作</router-link>
-          <router-link to="/checkin" class="nav-link" active-class="nav-link--active">打卡</router-link>
-          <router-link to="/history" class="nav-link" active-class="nav-link--active">复盘</router-link>
+          <router-link to="/daily" class="nav-link" active-class="nav-link--active">日常</router-link>
           <router-link to="/chat" class="nav-link" active-class="nav-link--active">助手</router-link>
         </nav>
       </div>
