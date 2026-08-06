@@ -45,6 +45,7 @@ class Plan(Base):
     macros_json: Mapped[str] = mapped_column(Text, default="{}")
     meal_plan: Mapped[str] = mapped_column(Text)
     workout_plan: Mapped[str] = mapped_column(Text)
+    workout_plan_json: Mapped[str] = mapped_column(Text, default="")  # 结构化训练计划
     summary: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

@@ -1550,5 +1550,94 @@ class AdditiveMigrationTests(unittest.TestCase):
                 engine.dispose()  # Windows 下释放文件锁，否则临时目录清理失败
 
 
+class ExerciseCandidateTests(unittest.TestCase):
+    """Training plan candidate pool: backend filters by equipment/location/experience."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        db_path = Path(self.temp_dir.name) / "exercise-test.db"
+        self.engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+        self.session_factory = async_sessionmaker(
+            self.engine, expire_on_commit=False
+        )
+
+        async def prepare():
+            async with self.engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            async with self.session_factory() as session:
+                from app.models.user import Exercise
+
+                session.add_all([
+                    Exercise(id="0001", name="push-up", body_part="chest",
+                             equipment="body weight", target="pectorals",
+                             difficulty="beginner", instructions_zh="俯卧撑",
+                             instruction_steps_zh='["步骤1"]'),
+                    Exercise(id="0025", name="barbell bench press", body_part="chest",
+                             equipment="barbell", target="pectorals",
+                             difficulty="advanced", instructions_zh="杠铃卧推",
+                             instruction_steps_zh='["步骤1"]'),
+                    Exercise(id="0294", name="dumbbell curl", body_part="upper arms",
+                             equipment="dumbbell", target="biceps",
+                             difficulty="intermediate", instructions_zh="哑铃弯举",
+                             instruction_steps_zh='["步骤1"]'),
+                ])
+                await session.commit()
+
+        asyncio.run(prepare())
+
+    def tearDown(self):
+        asyncio.run(self.engine.dispose())
+        self.temp_dir.cleanup()
+
+    def test_home_user_gets_bodyweight_and_dumbbell(self):
+        from app.graph.workflow import _query_exercise_candidates
+
+        profile = {
+            "equipment": [],
+            "training_location": "home",
+            "training_experience": "beginner",
+        }
+        # Patch async_session to use test DB
+        with patch("app.graph.workflow.async_session", self.session_factory):
+            candidates = asyncio.run(_query_exercise_candidates(profile))
+
+        ids = {c["id"] for c in candidates}
+        # Beginner at home: push-up (bodyweight, beginner) yes, dumbbell curl (intermediate) yes
+        # barbell bench press (advanced, barbell) no
+        self.assertIn("0001", ids)
+        self.assertIn("0294", ids)
+        self.assertNotIn("0025", ids)
+
+    def test_gym_advanced_user_gets_barbell(self):
+        from app.graph.workflow import _query_exercise_candidates
+
+        profile = {
+            "equipment": ["barbell", "dumbbell", "body weight"],
+            "training_location": "gym",
+            "training_experience": "advanced",
+        }
+        with patch("app.graph.workflow.async_session", self.session_factory):
+            candidates = asyncio.run(_query_exercise_candidates(profile))
+
+        ids = {c["id"] for c in candidates}
+        self.assertIn("0025", ids)  # barbell advanced
+        self.assertIn("0001", ids)  # bodyweight beginner
+        self.assertIn("0294", ids)  # dumbbell intermediate
+
+    def test_beginner_excludes_advanced(self):
+        from app.graph.workflow import _query_exercise_candidates
+
+        profile = {
+            "equipment": ["barbell", "dumbbell", "body weight"],
+            "training_location": "gym",
+            "training_experience": "beginner",
+        }
+        with patch("app.graph.workflow.async_session", self.session_factory):
+            candidates = asyncio.run(_query_exercise_candidates(profile))
+
+        ids = {c["id"] for c in candidates}
+        self.assertNotIn("0025", ids)  # advanced excluded for beginner
+
+
 if __name__ == "__main__":
     unittest.main()

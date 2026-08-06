@@ -59,6 +59,7 @@ async def generate_plan(
         macros_json=json.dumps(result["macros"], ensure_ascii=False),
         meal_plan=result["meal_plan"],
         workout_plan=result["workout_plan"],
+        workout_plan_json=result.get("workout_plan_json", ""),
         summary=result["summary"],
     )
     db.add(plan)
@@ -73,6 +74,7 @@ async def generate_plan(
         macros=MacrosInfo(**result["macros"]),
         meal_plan=result["meal_plan"],
         workout_plan=result["workout_plan"],
+        workout_plan_json=result.get("workout_plan_json", ""),
         summary=result["summary"],
         created_at=plan.created_at,
     )

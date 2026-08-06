@@ -5,6 +5,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from app.core.config import get_settings
 from app.tools.calorie_tools import calc_bmr, calc_daily_calorie, calc_macros
+from app.core.database import async_session
 from app.rag.retriever import get_retriever
 from app.rag.models import GoalType, KnowledgeCategory, SearchQuery
 
@@ -29,6 +30,8 @@ class AgentState(TypedDict):
     meal_plan: str
     workout_plan: str
     risk_warnings: list[str]       # 风险校验结果
+    workout_plan_json: str         # 结构化训练计划 JSON
+    exercise_candidates: list[dict]  # 候选动作池
     summary: str
 
 
@@ -345,83 +348,129 @@ def generate_meal_plan(state: AgentState) -> dict:
 
 
 def generate_workout_plan(state: AgentState) -> dict:
-    """生成运动建议，根据目标类型和训练条件分支"""
-    llm = get_llm(max_tokens=1200)
+    """Generate structured workout plan from exercise candidates.
+
+    LLM filters unsafe exercises for user injuries and编排 weekly plan.
+    Outputs workout_plan_json (structured) + workout_plan (text fallback).
+    """
+    llm = get_llm(max_tokens=2000)
     profile = state["user_profile"]
-    exercise_knowledge = state["exercise_knowledge"]
     calorie_info = state["calorie_info"]
     goal_type = state.get("goal_type", "fat_loss")
+    candidates = state.get("exercise_candidates", [])
 
-    # 训练条件字段
     training_days = profile.get("training_days_per_week", 3)
     session_duration = profile.get("session_duration_minutes", 60)
     location = profile.get("training_location", "gym")
-    equipment = profile.get("equipment", [])
     experience = profile.get("training_experience", "beginner")
-    preferred_time = profile.get("preferred_training_time", "evening")
+    injuries = profile.get("injuries", [])
+    injuries_text = ", ".join(injuries) if injuries else "none"
 
-    location_map = {"gym": "健身房", "home": "家里", "outdoor": "户外"}
-    experience_map = {"beginner": "新手", "intermediate": "有训练基础", "advanced": "进阶训练者"}
-    time_map = {"morning": "早上", "afternoon": "下午", "evening": "晚上"}
-
-    location_text = location_map.get(location, "健身房")
-    experience_text = experience_map.get(experience, "新手")
-    time_text = time_map.get(preferred_time, "晚上")
-    equipment_text = "、".join(equipment) if equipment else (
-        "哑铃、弹力带" if location == "home" else "健身房器械" if location == "gym" else "徒手"
-    )
-
-    training_context = f"""
-训练条件：每周{training_days}天，每次{session_duration}分钟，{location_text}，偏好{time_text}训练
-训练经验：{experience_text}
-可用器械：{equipment_text}"""
-
-    if location == "home":
-        training_context += "\n注意：用户在家训练，优先推荐徒手动作和简单器械动作，避免需要大型器械的动作。"
-    if experience == "beginner":
-        training_context += "\n注意：用户是新手，动作选择要基础安全，附带简短的动作要点说明。"
-    elif experience == "advanced":
-        training_context += "\n注意：用户有训练经验，可以安排更复杂的动作和更高的训练强度。"
+    pool_lines = []
+    for ex in candidates:
+        pool_lines.append(
+            f"[{ex['id']}] {ex['name']} "
+            f"(body_part:{ex['body_part']}, equipment:{ex['equipment']}, target:{ex.get('target', '')})"
+        )
+    pool_text = "\n".join(pool_lines) if pool_lines else "(empty pool, recommend basic exercises)"
 
     if goal_type == "muscle_gain":
-        goal_desc = f"""用户目标：增肌。
-训练策略：
-- 以力量训练和肌肥大训练为主，按胸/背/腿/肩/手臂或推拉腿拆分
-- 强调渐进超负荷，输出动作、组数、次数、RPE建议、进阶方式
-- 有氧只作为心肺和恢复辅助，每周1-2次，每次20-30分钟
-- 训练容量充足，每个肌群每周12-20组
-- 根据每周{training_days}天合理分配肌群"""
+        goal_desc = "muscle gain: hypertrophy focus, split by chest/back/legs/shoulders/arms, 12-20 sets per muscle group per week, progressive overload, cardio 1-2x 20-30min"
     else:
-        goal_desc = f"""用户目标：减脂。
-训练策略：
-- 力量训练用于保留肌肉，中等强度
-- 有氧训练增加消耗，每周3-4次，每次30-40分钟中低强度
-- 控制训练容量，避免热量缺口下恢复不足
-- 力量和有氧可以安排在同一天或交替
-- 根据每周{training_days}天合理安排力量和有氧"""
-    if session_duration <= 45:
-        goal_desc += f"\n注意：每次训练只有{session_duration}分钟，要精简高效，力量和有氧紧凑安排。"
+        goal_desc = "fat loss: strength for muscle retention (moderate) + cardio for expenditure (3-4x 30-40min), control total volume"
 
-    prompt = f"""你是健身教练。根据以下信息生成一周训练计划。
+    prompt = f"""You are a fitness coach. From the candidate exercise pool, exclude unsafe exercises for the user injuries, then arrange a weekly training plan.
 
-用户：{profile['gender']}，{profile['age']}岁，{profile['weight']}kg→目标{profile['target_weight']}kg
-活动水平：{profile.get('activity_level', 'medium')}，每日热量目标：{calorie_info['target_calories']}kcal
-{training_context}
+User: {profile.get('gender','')}, {profile.get('age','')}yo, {profile.get('weight','')}kg -> target {profile.get('target_weight','')}kg
+Goal: {goal_type}
+Training: {training_days} days/week, {session_duration} min/session, location={location}, experience={experience}
+Injuries: {injuries_text}
+Daily calorie target: {calorie_info.get('target_calories', 0)} kcal
 
-{goal_desc}
+Strategy: {goal_desc}
 
-运动参考：
-{exercise_knowledge[:500]}
+Candidate exercise pool (only select exercise_id from this list):
+{pool_text}
 
-输出格式（按{training_days}天列出，训练日用周一/周二等标记，休息日标注"休息"）：
-**周一** 力量（上肢）：动作1 组数x次数 / 动作2 ... / 有氧 时长
-**周二** 有氧：...
-...
+Output strict JSON only (no markdown, no extra text):
+{{
+  "excluded": [
+    {{"exercise_id": "0043", "reason": "knee injury, squat increases knee load"}}
+  ],
+  "weekly_plan": [
+    {{
+      "day": 1,
+      "theme": "chest+triceps",
+      "duration_minutes": {session_duration},
+      "exercises": [
+        {{"exercise_id": "0025", "sets": 4, "reps": "8-12", "rest_seconds": 75}}
+      ],
+      "cardio": {{"type": "elliptical", "duration_minutes": 20, "intensity": "low-moderate"}}
+    }}
+  ],
+  "warmup": ["5min dynamic warmup", "joint mobility"],
+  "notes": ["control tempo", "ensure rest between sets"]
+}}
 
-最后附：热身建议（2条）+ 训练注意事项（3条）。简洁明了。"""
+Rules:
+1. Only select exercise_id from the candidate pool, do not invent exercises or IDs
+2. Exclude all exercises unsafe for user injuries, explain each reason
+3. 4-6 exercises per day, fit within {session_duration} minutes
+4. {training_days} training days, rest days have theme "rest"
+5. If pool is empty, recommend 4-5 basic exercises with exercise_id "manual"
+"""
 
-    response = llm.invoke([HumanMessage(content=prompt)])
-    return {"workout_plan": response.content}
+    try:
+        response = llm.invoke([HumanMessage(content=prompt)])
+        raw = response.content.strip()
+        json_start = raw.find("{{")
+        json_end = raw.rfind("}}") + 2
+        if json_start >= 0 and json_end > json_start:
+            raw = raw[json_start:json_end]
+        plan_data = json.loads(raw)
+    except Exception:
+        plan_data = {
+            "excluded": [],
+            "weekly_plan": [],
+            "warmup": [],
+            "notes": ["plan generation error, please retry"],
+        }
+
+    valid_ids = {ex["id"] for ex in candidates}
+    for day in plan_data.get("weekly_plan", []):
+        day["exercises"] = [
+            ex for ex in day.get("exercises", [])
+            if ex.get("exercise_id") in valid_ids or ex.get("exercise_id") == "manual"
+        ]
+
+    workout_plan_json = json.dumps(plan_data, ensure_ascii=False)
+
+    text_lines = []
+    for day in plan_data.get("weekly_plan", []):
+        day_label = f"Day {day['day']}"
+        if day.get("theme") == "rest":
+            text_lines.append(f"**{day_label}** rest")
+            continue
+        ex_names = []
+        for ex in day.get("exercises", []):
+            ex_info = next((c for c in candidates if c["id"] == ex["exercise_id"]), None)
+            name = ex_info["name"] if ex_info else ex.get("exercise_id", "?")
+            ex_names.append(f"{name} {ex.get('sets','')}x{ex.get('reps','')}")
+        cardio = day.get("cardio")
+        cardio_text = f" / cardio: {cardio['type']} {cardio['duration_minutes']}min" if cardio else ""
+        text_lines.append(f"**{day_label}** {day.get('theme','')}: {' / '.join(ex_names)}{cardio_text}")
+
+    if plan_data.get("excluded"):
+        text_lines.append("\nExcluded (injury safety):")
+        for ex in plan_data["excluded"]:
+            text_lines.append(f"- {ex['exercise_id']}: {ex['reason']}")
+
+    workout_plan_text = "\n".join(text_lines) if text_lines else "plan generation failed, please retry"
+
+    return {
+        "workout_plan": workout_plan_text,
+        "workout_plan_json": workout_plan_json,
+    }
 
 
 def risk_guardrail(state: AgentState) -> dict:
@@ -587,11 +636,73 @@ def build_graph():
     return workflow.compile()
 
 
+
+async def _query_exercise_candidates(user_profile: dict) -> list[dict]:
+    """Query exercise database for candidate pool based on user equipment, location, experience."""
+    from app.models.user import Exercise
+    from sqlalchemy import select
+
+    equipment = user_profile.get("equipment", [])
+    location = user_profile.get("training_location", "gym")
+    experience = user_profile.get("training_experience", "beginner")
+
+    # Infer default equipment if empty
+    if not equipment:
+        if location == "home":
+            equipment = ["body weight", "dumbbell", "band"]
+        elif location == "outdoor":
+            equipment = ["body weight"]
+        else:
+            equipment = ["barbell", "dumbbell", "cable", "body weight", "leverage machine"]
+
+    # Difficulty filter by experience
+    if experience == "beginner":
+        allowed_difficulty = ["beginner", "intermediate"]
+    elif experience == "intermediate":
+        allowed_difficulty = ["beginner", "intermediate", "advanced"]
+    else:
+        allowed_difficulty = ["beginner", "intermediate", "advanced"]
+
+    async with async_session() as session:
+        stmt = (
+            select(Exercise)
+            .where(Exercise.equipment.in_(equipment))
+            .where(Exercise.difficulty.in_(allowed_difficulty))
+            .order_by(Exercise.body_part, Exercise.id)
+        )
+        result = await session.execute(stmt)
+        exercises = result.scalars().all()
+
+    # Limit per body_part for diversity (max 8 per part)
+    by_part: dict[str, list] = {}
+    for ex in exercises:
+        bp = ex.body_part
+        if bp not in by_part:
+            by_part[bp] = []
+        if len(by_part[bp]) < 8:
+            by_part[bp].append({
+                "id": ex.id,
+                "name": ex.name,
+                "body_part": ex.body_part,
+                "equipment": ex.equipment,
+                "target": ex.target or "",
+                "difficulty": ex.difficulty,
+            })
+
+    all_candidates = []
+    for items in by_part.values():
+        all_candidates.extend(items)
+    return all_candidates
+
+
 async def run_workflow(user_profile: dict) -> dict:
     """执行完整工作流。返回 dict 必含 status 字段：
     - status="plan"：计划生成成功
     - status="need_info"：需要用户补充信息
     """
+    # Query exercise candidates before running graph
+    exercise_candidates = await _query_exercise_candidates(user_profile)
+
     graph = build_graph()
 
     initial_state: AgentState = {
@@ -611,6 +722,8 @@ async def run_workflow(user_profile: dict) -> dict:
         "knowledge_citations": [],
         "meal_plan": "",
         "workout_plan": "",
+        "workout_plan_json": "",
+        "exercise_candidates": exercise_candidates,
         "risk_warnings": [],
         "summary": "",
     }
@@ -633,6 +746,7 @@ async def run_workflow(user_profile: dict) -> dict:
         "macros": result["macros"],
         "meal_plan": result["meal_plan"],
         "workout_plan": result["workout_plan"],
+        "workout_plan_json": result.get("workout_plan_json", ""),
         "summary": result["summary"],
         "knowledge_citations": result.get("knowledge_citations", []),
         "risk_warnings": result.get("risk_warnings", []),

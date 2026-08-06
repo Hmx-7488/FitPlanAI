@@ -28,6 +28,9 @@ def _ensure_additive_columns(sync_conn) -> None:
         "users": {
             "target_weeks": "ALTER TABLE users ADD COLUMN target_weeks INTEGER",
         },
+        "plans": {
+            "workout_plan_json": "ALTER TABLE plans ADD COLUMN workout_plan_json TEXT DEFAULT ''",
+        },
     }
     for table, columns in migrations.items():
         existing = {

@@ -45,6 +45,7 @@ def _to_plan_response(plan: Plan) -> PlanResponse:
         ),
         meal_plan=plan.meal_plan,
         workout_plan=plan.workout_plan,
+        workout_plan_json=plan.workout_plan_json if plan.workout_plan_json else None,
         summary=plan.summary,
         created_at=plan.created_at,
     )

@@ -40,6 +40,7 @@ class PlanResponse(BaseModel):
     macros: MacrosInfo
     meal_plan: str
     workout_plan: str
+    workout_plan_json: Optional[str] = None  # 结构化训练计划
     summary: str
     created_at: Optional[datetime] = None
 
