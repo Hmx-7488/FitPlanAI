@@ -2,8 +2,8 @@
 import { ref, onMounted, computed, nextTick, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { getLatestPlan, generatePlan } from '../api'
-import type { PlanResponse, NeedInfoResponse } from '../types'
+import { getLatestPlan, generatePlan, getExerciseDetail, type ExerciseDetail } from '../api'
+import type { PlanResponse, NeedInfoResponse, StructuredWorkoutPlan } from '../types'
 import { sanitizeHtml } from '../utils/sanitize'
 import gsap from 'gsap'
 
@@ -121,6 +121,42 @@ function formatPlan(text: string): string {
     .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
     .replace(/#{1,3}\s(.+)/g, '<h4>$1</h4>')
   return sanitizeHtml(rendered)
+}
+
+/** 解析结构化训练计划 JSON */
+const structuredWorkout = computed<StructuredWorkoutPlan | null>(() => {
+  if (!plan.value?.workout_plan_json) return null
+  try {
+    return JSON.parse(plan.value.workout_plan_json) as StructuredWorkoutPlan
+  } catch {
+    return null
+  }
+})
+
+/** 动作详情缓存：exercise_id -> ExerciseDetail */
+const exerciseCache = ref<Record<string, ExerciseDetail>>({})
+const expandedExercises = ref<Set<string>>(new Set())
+const loadingExercises = ref<Set<string>>(new Set())
+
+async function toggleExercise(exerciseId: string) {
+  if (expandedExercises.value.has(exerciseId)) {
+    expandedExercises.value.delete(exerciseId)
+    return
+  }
+  expandedExercises.value.add(exerciseId)
+
+  // 懒加载动作详情
+  if (!exerciseCache.value[exerciseId] && exerciseId !== 'manual' && !loadingExercises.value.has(exerciseId)) {
+    loadingExercises.value.add(exerciseId)
+    try {
+      const detail = await getExerciseDetail(exerciseId)
+      exerciseCache.value[exerciseId] = detail
+    } catch {
+      // 加载失败静默处理，卡片仍显示基本信息
+    } finally {
+      loadingExercises.value.delete(exerciseId)
+    }
+  }
 }
 
 function animatePlan() {
@@ -289,11 +325,99 @@ onMounted(async () => {
             {{ tab.label }}
           </button>
         </div>
-        <div class="plan-content" v-html="formatPlan(
-          activeTab === 'meal' ? plan.meal_plan :
-          activeTab === 'workout' ? plan.workout_plan :
-          plan.summary
-        )"></div>
+
+        <!-- 运动计划：结构化渲染 -->
+        <div v-if="activeTab === 'workout' && structuredWorkout" class="workout-structured">
+          <!-- 排除动作 -->
+          <div v-if="structuredWorkout.excluded.length" class="excluded-section">
+            <h4 class="excluded-title">已排除（伤病安全）</h4>
+            <div v-for="ex in structuredWorkout.excluded" :key="ex.exercise_id" class="excluded-item">
+              <span class="excluded-id">{{ ex.exercise_id }}</span>
+              <span class="excluded-reason">{{ ex.reason }}</span>
+            </div>
+          </div>
+
+          <!-- 每日计划 -->
+          <div v-for="day in structuredWorkout.weekly_plan" :key="day.day" class="workout-day">
+            <div class="day-header">
+              <span class="day-number">第{{ day.day }}天</span>
+              <span class="day-theme">{{ day.theme }}</span>
+              <span class="day-duration" v-if="day.duration_minutes">{{ day.duration_minutes }}分钟</span>
+            </div>
+
+            <div v-if="day.theme === 'rest' || day.theme === '休息'" class="day-rest">休息日</div>
+
+            <div v-else class="exercise-list">
+              <div
+                v-for="ex in day.exercises"
+                :key="ex.exercise_id"
+                class="exercise-card"
+                :class="{ 'exercise-card--expanded': expandedExercises.has(ex.exercise_id) }"
+              >
+                <div class="exercise-header" @click="toggleExercise(ex.exercise_id)">
+                  <span class="exercise-name">
+                    {{ exerciseCache[ex.exercise_id]?.name_zh || exerciseCache[ex.exercise_id]?.name || ex.exercise_id }}
+                  </span>
+                  <span class="exercise-sets">{{ ex.sets }} × {{ ex.reps }}</span>
+                  <span class="exercise-rest" v-if="ex.rest_seconds">{{ ex.rest_seconds }}s休息</span>
+                  <span class="exercise-toggle">{{ expandedExercises.has(ex.exercise_id) ? '▾' : '▸' }}</span>
+                </div>
+
+                <div v-if="expandedExercises.has(ex.exercise_id)" class="exercise-detail">
+                  <div v-if="loadingExercises.has(ex.exercise_id)" class="exercise-loading">加载中...</div>
+                  <template v-else-if="exerciseCache[ex.exercise_id]">
+                    <div class="exercise-media" v-if="exerciseCache[ex.exercise_id].gif_url">
+                      <img
+                        :src="exerciseCache[ex.exercise_id].gif_url"
+                        :alt="exerciseCache[ex.exercise_id].name_zh"
+                        class="exercise-gif"
+                      />
+                      <span class="exercise-attribution">© Gym visual</span>
+                    </div>
+                    <div class="exercise-steps">
+                      <div class="exercise-meta">
+                        <span>部位: {{ exerciseCache[ex.exercise_id].body_part }}</span>
+                        <span>器械: {{ exerciseCache[ex.exercise_id].equipment }}</span>
+                        <span>目标: {{ exerciseCache[ex.exercise_id].target }}</span>
+                      </div>
+                      <ol class="steps-list">
+                        <li v-for="(step, i) in exerciseCache[ex.exercise_id].instruction_steps_zh" :key="i">{{ step }}</li>
+                      </ol>
+                    </div>
+                  </template>
+                  <div v-else class="exercise-loading">详情加载失败</div>
+                </div>
+              </div>
+
+              <!-- 有氧 -->
+              <div v-if="day.cardio" class="cardio-row">
+                <span class="cardio-label">有氧</span>
+                <span class="cardio-detail">{{ day.cardio.type }} {{ day.cardio.duration_minutes }}分钟 · {{ day.cardio.intensity }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 热身和注意事项 -->
+          <div v-if="structuredWorkout.warmup?.length" class="workout-extras">
+            <h4>热身建议</h4>
+            <ul><li v-for="(w, i) in structuredWorkout.warmup" :key="i">{{ w }}</li></ul>
+          </div>
+          <div v-if="structuredWorkout.notes?.length" class="workout-extras">
+            <h4>注意事项</h4>
+            <ul><li v-for="(n, i) in structuredWorkout.notes" :key="i">{{ n }}</li></ul>
+          </div>
+        </div>
+
+        <!-- 文本兜底（饮食、总结、或老计划无 JSON） -->
+        <div
+          v-else
+          class="plan-content"
+          v-html="formatPlan(
+            activeTab === 'meal' ? plan.meal_plan :
+            activeTab === 'workout' ? plan.workout_plan :
+            plan.summary
+          )"
+        ></div>
       </div>
     </template>
   </div>
@@ -781,5 +905,247 @@ onMounted(async () => {
   .metric-value {
     font-size: 40px;
   }
+  .exercise-detail {
+    flex-direction: column !important;
+  }
+  .exercise-gif {
+    width: 120px !important;
+    height: 120px !important;
+  }
+}
+
+/* Structured workout plan */
+.workout-structured {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.excluded-section {
+  background: oklch(0.96 0.03 80);
+  border: 1px solid oklch(0.88 0.05 80);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+}
+
+.excluded-title {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: oklch(0.45 0.12 80);
+  margin-bottom: var(--space-2);
+}
+
+.excluded-item {
+  display: flex;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-1);
+}
+
+.excluded-id {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+}
+
+.workout-day {
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.day-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-accent-subtle);
+}
+
+.day-number {
+  font-weight: 700;
+  font-size: var(--text-base);
+  color: var(--color-accent);
+}
+
+.day-theme {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  flex: 1;
+}
+
+.day-duration {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono);
+}
+
+.day-rest {
+  padding: var(--space-4);
+  text-align: center;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+}
+
+.exercise-list {
+  padding: var(--space-2) var(--space-4) var(--space-3);
+}
+
+.exercise-card {
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.exercise-card:last-child {
+  border-bottom: none;
+}
+
+.exercise-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+  border-radius: var(--radius-sm);
+  padding-left: var(--space-2);
+  padding-right: var(--space-2);
+}
+
+.exercise-header:hover {
+  background: var(--color-accent-subtle);
+}
+
+.exercise-name {
+  flex: 1;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.exercise-sets {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-accent);
+}
+
+.exercise-rest {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+}
+
+.exercise-toggle {
+  font-size: var(--text-sm);
+  color: var(--color-text-tertiary);
+  width: 16px;
+  text-align: center;
+}
+
+.exercise-detail {
+  display: flex;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-2) var(--space-4);
+}
+
+.exercise-media {
+  flex-shrink: 0;
+  position: relative;
+}
+
+.exercise-gif {
+  width: 180px;
+  height: 180px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+}
+
+.exercise-attribution {
+  display: block;
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+  text-align: center;
+  margin-top: 2px;
+}
+
+.exercise-steps {
+  flex: 1;
+  min-width: 0;
+}
+
+.exercise-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.exercise-meta span {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  background: var(--color-surface);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+}
+
+.steps-list {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  line-height: var(--leading-relaxed);
+  padding-left: var(--space-5);
+}
+
+.steps-list li {
+  margin-bottom: var(--space-1);
+}
+
+.exercise-loading {
+  font-size: var(--text-sm);
+  color: var(--color-text-tertiary);
+  padding: var(--space-2) 0;
+}
+
+.cardio-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  margin-top: var(--space-2);
+}
+
+.cardio-label {
+  font-size: var(--text-xs);
+  font-weight: 700;
+  color: var(--color-accent);
+  text-transform: uppercase;
+}
+
+.cardio-detail {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.workout-extras {
+  background: var(--color-surface);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+}
+
+.workout-extras h4 {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin-bottom: var(--space-2);
+}
+
+.workout-extras ul {
+  padding-left: var(--space-5);
+}
+
+.workout-extras li {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-1);
 }
 </style>

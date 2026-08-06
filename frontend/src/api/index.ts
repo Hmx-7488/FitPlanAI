@@ -64,6 +64,26 @@ export async function applyCalorieAdjustment(
   return res.data
 }
 
+// 动作库
+export interface ExerciseDetail {
+  id: string
+  name: string
+  name_zh: string
+  body_part: string
+  equipment: string
+  target: string
+  difficulty: string
+  instructions_zh: string
+  instruction_steps_zh: string[]
+  image_url: string
+  gif_url: string
+}
+
+export async function getExerciseDetail(exerciseId: string): Promise<ExerciseDetail> {
+  const res = await api.get<ExerciseDetail>(`/exercises/${exerciseId}`)
+  return res.data
+}
+
 // 每日打卡
 export async function createCheckin(data: CheckinData): Promise<CheckinResponse> {
   const res = await api.post<CheckinResponse>('/checkin/create', data)

@@ -62,8 +62,31 @@ export interface PlanResponse {
   macros: MacrosInfo
   meal_plan: string
   workout_plan: string
+  workout_plan_json?: string | null
   summary: string
   created_at?: string
+}
+
+export interface WorkoutExercise {
+  exercise_id: string
+  sets: number
+  reps: string
+  rest_seconds: number
+}
+
+export interface WorkoutDay {
+  day: number
+  theme: string
+  duration_minutes: number
+  exercises: WorkoutExercise[]
+  cardio?: { type: string; duration_minutes: number; intensity: string }
+}
+
+export interface StructuredWorkoutPlan {
+  excluded: { exercise_id: string; reason: string }[]
+  weekly_plan: WorkoutDay[]
+  warmup: string[]
+  notes: string[]
 }
 
 // 打卡相关
