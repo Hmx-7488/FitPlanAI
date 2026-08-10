@@ -61,6 +61,7 @@ export interface PlanResponse {
   calorie_info: CalorieInfo
   macros: MacrosInfo
   meal_plan: string
+  meal_plan_json?: string | null
   workout_plan: string
   workout_plan_json?: string | null
   summary: string
@@ -87,6 +88,36 @@ export interface StructuredWorkoutPlan {
   weekly_plan: WorkoutDay[]
   warmup: string[]
   notes: string[]
+}
+
+export interface MealItem {
+  food_id: number
+  name: string
+  portion_g: number
+  calories: number
+  protein_g: number
+  carbs_g: number
+  fat_g: number
+  is_from_database: boolean
+}
+
+export interface MealBlock {
+  meal_type: string
+  items: MealItem[]
+  meal_total: { calories: number; protein_g: number; carbs_g: number; fat_g: number }
+}
+
+export interface StructuredMealPlan {
+  meals: MealBlock[]
+  daily_total: { calories: number; protein_g: number; carbs_g: number; fat_g: number }
+  target_match: {
+    protein_pct: number
+    carbs_pct: number
+    fat_pct: number
+    calories_pct: number
+  }
+  snack_suggestion?: string
+  tips?: string[]
 }
 
 // 打卡相关

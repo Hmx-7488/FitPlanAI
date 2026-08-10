@@ -3,7 +3,7 @@ import { ref, onMounted, computed, nextTick, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getLatestPlan, generatePlan, getExerciseDetail, type ExerciseDetail } from '../api'
-import type { PlanResponse, NeedInfoResponse, StructuredWorkoutPlan } from '../types'
+import type { PlanResponse, NeedInfoResponse, StructuredWorkoutPlan, StructuredMealPlan } from '../types'
 import { sanitizeHtml } from '../utils/sanitize'
 import gsap from 'gsap'
 
@@ -132,6 +132,23 @@ const structuredWorkout = computed<StructuredWorkoutPlan | null>(() => {
     return null
   }
 })
+
+/** 解析结构化饮食计划 JSON */
+const structuredMeal = computed<StructuredMealPlan | null>(() => {
+  if (!plan.value?.meal_plan_json) return null
+  try {
+    return JSON.parse(plan.value.meal_plan_json) as StructuredMealPlan
+  } catch {
+    return null
+  }
+})
+
+/** 目标匹配状态：绿/黄/红 */
+function matchColor(pct: number): string {
+  if (pct >= 85 && pct <= 115) return 'var(--color-accent)'
+  if (pct >= 70 && pct <= 130) return 'var(--color-warning)'
+  return 'oklch(0.55 0.18 25)'
+}
 
 /** 动作详情缓存：exercise_id -> ExerciseDetail */
 const exerciseCache = ref<Record<string, ExerciseDetail>>({})
@@ -324,6 +341,85 @@ onMounted(async () => {
           >
             {{ tab.label }}
           </button>
+        </div>
+
+        <!-- 饮食计划：结构化渲染 -->
+        <div v-if="activeTab === 'meal' && structuredMeal" class="meal-structured">
+          <!-- 每日目标匹配 -->
+          <div class="match-card">
+            <h4 class="match-title">每日目标匹配</h4>
+            <div class="match-grid">
+              <div class="match-item">
+                <span class="match-label">热量</span>
+                <span class="match-value" :style="{ color: matchColor(structuredMeal.target_match.calories_pct) }">
+                  {{ structuredMeal.daily_total.calories }} / {{ plan.calorie_info.target_calories }} kcal
+                </span>
+                <span class="match-pct" :style="{ color: matchColor(structuredMeal.target_match.calories_pct) }">
+                  {{ structuredMeal.target_match.calories_pct }}%
+                </span>
+              </div>
+              <div class="match-item">
+                <span class="match-label">蛋白质</span>
+                <span class="match-value" :style="{ color: matchColor(structuredMeal.target_match.protein_pct) }">
+                  {{ structuredMeal.daily_total.protein_g }} / {{ plan.macros.protein_g }}g
+                </span>
+                <span class="match-pct" :style="{ color: matchColor(structuredMeal.target_match.protein_pct) }">
+                  {{ structuredMeal.target_match.protein_pct }}%
+                </span>
+              </div>
+              <div class="match-item">
+                <span class="match-label">碳水</span>
+                <span class="match-value" :style="{ color: matchColor(structuredMeal.target_match.carbs_pct) }">
+                  {{ structuredMeal.daily_total.carbs_g }} / {{ plan.macros.carbs_g }}g
+                </span>
+                <span class="match-pct" :style="{ color: matchColor(structuredMeal.target_match.carbs_pct) }">
+                  {{ structuredMeal.target_match.carbs_pct }}%
+                </span>
+              </div>
+              <div class="match-item">
+                <span class="match-label">脂肪</span>
+                <span class="match-value" :style="{ color: matchColor(structuredMeal.target_match.fat_pct) }">
+                  {{ structuredMeal.daily_total.fat_g }} / {{ plan.macros.fat_g }}g
+                </span>
+                <span class="match-pct" :style="{ color: matchColor(structuredMeal.target_match.fat_pct) }">
+                  {{ structuredMeal.target_match.fat_pct }}%
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 每餐详情 -->
+          <div v-for="(meal, mi) in structuredMeal.meals" :key="mi" class="meal-block">
+            <div class="meal-header">
+              <span class="meal-type">{{ meal.meal_type }}</span>
+              <span class="meal-total">{{ meal.meal_total.calories }} kcal | P{{ meal.meal_total.protein_g }}g C{{ meal.meal_total.carbs_g }}g F{{ meal.meal_total.fat_g }}g</span>
+            </div>
+            <div class="food-list">
+              <div v-for="(item, ii) in meal.items" :key="ii" class="food-row">
+                <div class="food-name">
+                  {{ item.name }}
+                  <span class="food-db" v-if="item.is_from_database">数据库</span>
+                  <span class="food-db food-db--est" v-else>估算</span>
+                </div>
+                <div class="food-portion">{{ item.portion_g }}g</div>
+                <div class="food-nutrition">
+                  {{ item.calories }}kcal | P{{ item.protein_g }}g C{{ item.carbs_g }}g F{{ item.fat_g }}g
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 加餐建议 -->
+          <div v-if="structuredMeal.snack_suggestion" class="meal-extras">
+            <h4>加餐建议</h4>
+            <p>{{ structuredMeal.snack_suggestion }}</p>
+          </div>
+
+          <!-- 饮食提示 -->
+          <div v-if="structuredMeal.tips?.length" class="meal-extras">
+            <h4>饮食提示</h4>
+            <ul><li v-for="(t, i) in structuredMeal.tips" :key="i">{{ t }}</li></ul>
+          </div>
         </div>
 
         <!-- 运动计划：结构化渲染 -->
@@ -1147,5 +1243,180 @@ onMounted(async () => {
   font-size: var(--text-sm);
   color: var(--color-text-secondary);
   margin-bottom: var(--space-1);
+}
+
+/* Structured meal plan */
+.meal-structured {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.match-card {
+  background: var(--color-accent-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+}
+
+.match-title {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin-bottom: var(--space-3);
+}
+
+.match-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-3);
+}
+
+.match-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.match-label {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.match-value {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.match-pct {
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+
+.meal-block {
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.meal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-accent-subtle);
+}
+
+.meal-type {
+  font-weight: 700;
+  font-size: var(--text-base);
+  color: var(--color-accent);
+  text-transform: capitalize;
+}
+
+.meal-total {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+}
+
+.food-list {
+  padding: var(--space-2) var(--space-4) var(--space-3);
+}
+
+.food-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.food-row:last-child {
+  border-bottom: none;
+}
+
+.food-name {
+  flex: 1;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-text-primary);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.food-db {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--color-accent-subtle);
+  color: var(--color-accent);
+  font-weight: 500;
+}
+
+.food-db--est {
+  background: oklch(0.95 0.04 80);
+  color: oklch(0.45 0.12 80);
+}
+
+.food-portion {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+}
+
+.food-nutrition {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  flex-shrink: 0;
+}
+
+.meal-extras {
+  background: var(--color-surface);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+}
+
+.meal-extras h4 {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin-bottom: var(--space-2);
+}
+
+.meal-extras p {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  line-height: var(--leading-relaxed);
+}
+
+.meal-extras ul {
+  padding-left: var(--space-5);
+}
+
+.meal-extras li {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-1);
+}
+
+@media (max-width: 480px) {
+  .match-grid {
+    grid-template-columns: 1fr;
+  }
+  .food-row {
+    flex-wrap: wrap;
+  }
+  .food-nutrition {
+    width: 100%;
+    padding-left: 0;
+  }
 }
 </style>
