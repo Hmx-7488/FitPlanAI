@@ -31,6 +31,7 @@ def _ensure_additive_columns(sync_conn) -> None:
         "plans": {
             "workout_plan_json": "ALTER TABLE plans ADD COLUMN workout_plan_json TEXT DEFAULT ''",
             "meal_plan_json": "ALTER TABLE plans ADD COLUMN meal_plan_json TEXT DEFAULT ''",
+            "supplements_json": "ALTER TABLE plans ADD COLUMN supplements_json TEXT DEFAULT ''",
         },
     }
     for table, columns in migrations.items():

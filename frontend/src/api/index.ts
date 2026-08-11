@@ -11,8 +11,10 @@ import type {
   RecipeImageJob,
   IngredientItem,
   MealItem,
+  MealRecognitionItem,
   MealAnalysis,
   MealDailySummary,
+  WorkoutAdjustRequest,
   ChatConversation,
   ChatConversationDetail,
   BodyPhotoAnalysis,
@@ -61,6 +63,23 @@ export async function applyCalorieAdjustment(
     user_id: userId,
     daily_calorie_target: dailyCalorieTarget,
   })
+  return res.data
+}
+
+// 用户确认后写入训练调整（复盘调整草案的确认入口）
+export async function applyWorkoutAdjustment(
+  userId: number,
+  planId: number,
+  baseWorkoutPlanJson: string,
+  adjustedWorkoutPlanJson: string
+): Promise<PlanResponse> {
+  const request: WorkoutAdjustRequest = {
+    user_id: userId,
+    plan_id: planId,
+    base_workout_plan_json: baseWorkoutPlanJson,
+    adjusted_workout_plan_json: adjustedWorkoutPlanJson,
+  }
+  const res = await api.post<PlanResponse>('/plan/adjust-workout', request)
   return res.data
 }
 
@@ -327,7 +346,7 @@ export interface MealCalculateRequest {
 }
 
 // MealAnalysis、MealDailySummary 统一从 types 导入
-export type { MealAnalysis, MealDailySummary, MealItem }
+export type { MealAnalysis, MealDailySummary, MealItem, MealRecognitionItem }
 
 export async function recognizeMeal(
   userId: number,

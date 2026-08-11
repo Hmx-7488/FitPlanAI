@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.user import User, Plan
 from app.schemas.plan import PlanGenerateRequest, PlanResponse, NeedInfoResponse, CalorieInfo, MacrosInfo
 from app.graph.workflow import run_workflow
+from app.services.supplement_service import generate_supplement_recommendations
 
 
 async def generate_plan(
@@ -52,6 +53,20 @@ async def generate_plan(
         )
 
     # 保存计划到数据库
+    # 生成补剂推荐
+    goal_type = user.goal_type or "fat_loss"
+    injuries_list = json.loads(user.injuries) if user.injuries else []
+    allergies_list = json.loads(user.allergies) if user.allergies else []
+    forbidden_foods_list = json.loads(user.forbidden_foods) if user.forbidden_foods else []
+    supplements = await generate_supplement_recommendations(
+        goal_type=goal_type,
+        injuries=injuries_list,
+        diet_preference=user.diet_preference or "balanced",
+        allergies=allergies_list,
+        forbidden_foods=forbidden_foods_list,
+    )
+    supplements_json = json.dumps(supplements, ensure_ascii=False) if supplements else ""
+
     plan = Plan(
         user_id=user.id,
         daily_calorie_target=result["calorie_info"]["target_calories"],
@@ -61,6 +76,7 @@ async def generate_plan(
         meal_plan_json=result.get("meal_plan_json", ""),
         workout_plan=result["workout_plan"],
         workout_plan_json=result.get("workout_plan_json", ""),
+        supplements_json=supplements_json,
         summary=result["summary"],
     )
     db.add(plan)
@@ -77,6 +93,7 @@ async def generate_plan(
         meal_plan_json=result.get("meal_plan_json", ""),
         workout_plan=result["workout_plan"],
         workout_plan_json=result.get("workout_plan_json", ""),
+        supplements_json=supplements_json,
         summary=result["summary"],
         created_at=plan.created_at,
     )

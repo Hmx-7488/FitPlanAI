@@ -47,6 +47,7 @@ class Plan(Base):
     meal_plan_json: Mapped[str] = mapped_column(Text, default="")  # 结构化饮食计划
     workout_plan: Mapped[str] = mapped_column(Text)
     workout_plan_json: Mapped[str] = mapped_column(Text, default="")  # 结构化训练计划
+    supplements_json: Mapped[str] = mapped_column(Text, default="")  # 补剂推荐 JSON
     summary: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

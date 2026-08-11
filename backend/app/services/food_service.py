@@ -1,7 +1,7 @@
 ﻿"""食物热量库导入服务。
 
 首次启动时从 data/foods/foods_zh.json 导入自建食物营养数据。
-已存在数据时跳过（幂等）。
+已存在相同 name_zh 的记录时跳过（增量导入）。
 """
 import json
 import logging
@@ -16,13 +16,10 @@ DATA_FILE = Path(__file__).parent.parent.parent / "data" / "foods" / "foods_zh.j
 
 
 async def import_foods_if_empty(db: AsyncSession) -> int:
-    """如果 foods 表为空，从 JSON 导入。返回导入条数。"""
-    count_stmt = select(func.count(Food.id))
-    total = (await db.execute(count_stmt)).scalar() or 0
-    if total > 0:
-        logger.info("Foods already imported: %d records, skipping import.", total)
-        return 0
+    """从 JSON 增量导入食物数据。返回新导入条数。
 
+    如果表为空，导入全部；如果表已有数据，只导入 name_zh 不存在的新条目。
+    """
     if not DATA_FILE.exists():
         logger.warning("Food data file not found: %s", DATA_FILE)
         return 0
@@ -30,9 +27,21 @@ async def import_foods_if_empty(db: AsyncSession) -> int:
     with open(DATA_FILE, encoding="utf-8") as f:
         data = json.load(f)
 
-    logger.info("Importing %d foods from %s ...", len(data), DATA_FILE.name)
+    # 查询已存在的 name_zh 集合
+    existing_stmt = select(Food.name_zh)
+    existing_result = await db.execute(existing_stmt)
+    existing_names = {row[0] for row in existing_result}
 
-    for item in data:
+    new_items = [item for item in data if item["name_zh"] not in existing_names]
+    if not new_items:
+        count_stmt = select(func.count(Food.id))
+        total = (await db.execute(count_stmt)).scalar() or 0
+        logger.info("Foods already up to date: %d records, no new items.", total)
+        return 0
+
+    logger.info("Importing %d new foods (existing: %d) ...", len(new_items), len(existing_names))
+
+    for item in new_items:
         food = Food(
             name_zh=item["name_zh"],
             aliases=json.dumps(item.get("aliases", []), ensure_ascii=False),
@@ -51,5 +60,5 @@ async def import_foods_if_empty(db: AsyncSession) -> int:
         db.add(food)
 
     await db.commit()
-    logger.info("Foods imported successfully: %d records.", len(data))
-    return len(data)
+    logger.info("Foods imported successfully: %d new records.", len(new_items))
+    return len(new_items)

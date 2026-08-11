@@ -47,7 +47,13 @@ def calc_daily_calorie(
     }
 
 
-def calc_macros(target_calories: float, weight: float, activity_level: str, goal_type: str = "fat_loss") -> dict:
+def calc_macros(
+    target_calories: float,
+    weight: float,
+    activity_level: str,
+    goal_type: str = "fat_loss",
+    diet_preference: str = "balanced",
+) -> dict:
     """计算三大营养素分配，根据目标类型分支"""
     if goal_type == "muscle_gain":
         # 增肌：蛋白质 1.8-2.4g/kg，脂肪 20%-30%，碳水优先保障训练
@@ -58,13 +64,17 @@ def calc_macros(target_calories: float, weight: float, activity_level: str, goal
         protein_g = round(weight * protein_per_kg)
         protein_cal = protein_g * 4
 
-        # 脂肪占总热量 25%
-        fat_cal = target_calories * 0.25
-        fat_g = round(fat_cal / 9)
+        if diet_preference == "low_carb":
+            carb_g = max(round(target_calories * 0.20 / 4), 50)
+            fat_g = round(max(target_calories - protein_cal - carb_g * 4, 0) / 9)
+        else:
+            # 脂肪占总热量 25%
+            fat_cal = target_calories * 0.25
+            fat_g = round(fat_cal / 9)
 
-        # 碳水：剩余热量（优先保障训练表现）
-        carb_cal = target_calories - protein_cal - fat_cal
-        carb_g = round(carb_cal / 4)
+            # 碳水：剩余热量（优先保障训练表现）
+            carb_cal = target_calories - protein_cal - fat_cal
+            carb_g = round(carb_cal / 4)
     else:
         # 减脂：蛋白质 1.6-2.2g/kg，脂肪不低于 20%，碳水剩余
         if activity_level in ("high", "very_high"):
@@ -74,13 +84,17 @@ def calc_macros(target_calories: float, weight: float, activity_level: str, goal
         protein_g = round(weight * protein_per_kg)
         protein_cal = protein_g * 4
 
-        # 脂肪：不低于总热量的20%
-        fat_cal = target_calories * 0.25
-        fat_g = round(fat_cal / 9)
+        if diet_preference == "low_carb":
+            carb_g = max(round(target_calories * 0.20 / 4), 50)
+            fat_g = round(max(target_calories - protein_cal - carb_g * 4, 0) / 9)
+        else:
+            # 脂肪：不低于总热量的20%
+            fat_cal = target_calories * 0.25
+            fat_g = round(fat_cal / 9)
 
-        # 碳水：剩余热量
-        carb_cal = target_calories - protein_cal - fat_cal
-        carb_g = round(carb_cal / 4)
+            # 碳水：剩余热量
+            carb_cal = target_calories - protein_cal - fat_cal
+            carb_g = round(carb_cal / 4)
 
     return {
         "protein_g": protein_g,

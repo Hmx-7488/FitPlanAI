@@ -1401,6 +1401,16 @@ class AdjustCaloriesEndpointTests(unittest.TestCase):
                     id=2, gender="female", age=28, height=165, weight=60,
                     target_weight=55,
                 ))
+                session.add(User(
+                    id=3, gender="male", age=30, height=175, weight=70,
+                    target_weight=65, diet_preference="low_carb",
+                ))
+                session.add(Plan(
+                    id=2, user_id=3, daily_calorie_target=2000,
+                    calorie_info_json='{"tdee": 2500, "deficit": 500}',
+                    macros_json='{"protein_g": 112, "carbs_g": 100, "fat_g": 124}',
+                    meal_plan="m", workout_plan="w",
+                ))
                 await session.commit()
 
         asyncio.run(prepare())
@@ -1431,6 +1441,21 @@ class AdjustCaloriesEndpointTests(unittest.TestCase):
             json={"user_id": 2, "daily_calorie_target": 1800},
         )
         self.assertEqual(response.status_code, 404)
+
+    def test_adjust_preserves_low_carb_macro_preference(self):
+        response = self.client.post(
+            "/api/plan/adjust-calories",
+            json={"user_id": 3, "daily_calorie_target": 1800},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        macros = response.json()["macros"]
+        self.assertEqual(macros["carbs_g"], 90)
+        self.assertAlmostEqual(
+            macros["carbs_g"] * 4 / 1800,
+            0.20,
+            places=2,
+        )
 
     def test_adjust_out_of_range_rejected(self):
         response = self.client.post(
@@ -1672,6 +1697,11 @@ class FoodCandidateTests(unittest.TestCase):
                          fiber_g=0.4, sodium_mg=2, default_portion_g=200,
                          default_portion_name="一碗", diet_tags='[]',
                          common_dishes='["炒饭"]'),
+                    Food(id=4, name_zh="豆腐", aliases='[]', category="protein",
+                         calories_kcal=84, protein_g=6.6, carbs_g=3.4, fat_g=5.3,
+                         fiber_g=0.4, sodium_mg=8, default_portion_g=150,
+                         default_portion_name="一份", diet_tags='["high_protein","vegetarian"]',
+                         common_dishes='["家常豆腐"]'),
                 ])
                 await session.commit()
 
@@ -1703,7 +1733,21 @@ class FoodCandidateTests(unittest.TestCase):
         with patch("app.graph.workflow.async_session", self.session_factory):
             candidates = asyncio.run(_query_food_candidates(profile, {}))
 
-        self.assertEqual(len(candidates), 3)
+        self.assertEqual(len(candidates), 4)
+
+    def test_vegetarian_preference_excludes_meat_and_keeps_plant_foods(self):
+        from app.graph.workflow import _query_food_candidates
+
+        profile = {
+            "diet_preference": "vegetarian",
+            "forbidden_foods": [],
+            "allergies": [],
+        }
+        with patch("app.graph.workflow.async_session", self.session_factory):
+            candidates = asyncio.run(_query_food_candidates(profile, {}))
+
+        names = {candidate["name"] for candidate in candidates}
+        self.assertEqual(names, {"米饭", "豆腐"})
 
     def test_candidates_include_nutrition_data(self):
         from app.graph.workflow import _query_food_candidates

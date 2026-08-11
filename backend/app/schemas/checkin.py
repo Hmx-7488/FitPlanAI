@@ -36,6 +36,22 @@ class CalorieAdjustment(BaseModel):
     basis: str  # 调整依据说明
 
 
+class WorkoutAdjustmentChange(BaseModel):
+    """训练调整单条变更"""
+    day: str  # "all" 或具体天数 "1"/"2"/...
+    action: str  # replace/reduce_volume/increase_cardio/increase_volume
+    old_exercise_keyword: Optional[str] = None  # replace 时的旧动作关键词
+    detail: Optional[str] = None  # 具体调整说明
+    reason: str
+
+
+class WorkoutAdjustment(BaseModel):
+    """训练计划调整草案（仅建议，需用户确认后才写入计划）"""
+    reason: str
+    changes: list[WorkoutAdjustmentChange]
+    risk_notes: list[str] = []
+
+
 class ReviewResponse(BaseModel):
     user_id: int
     checkin_count: int
@@ -43,3 +59,4 @@ class ReviewResponse(BaseModel):
     review_summary: str  # AI 复盘总结
     next_day_advice: str  # 次日调整建议
     calorie_adjustment: Optional[CalorieAdjustment] = None  # 热量调整草案
+    workout_adjustment: Optional[WorkoutAdjustment] = None  # 训练调整草案

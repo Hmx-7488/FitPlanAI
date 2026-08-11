@@ -2,7 +2,14 @@
 import { ref, onMounted, nextTick, useTemplateRef } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { getCheckinHistory, getReview, applyCalorieAdjustment } from '../api'
+import {
+  getCheckinHistory,
+  getReview,
+  applyCalorieAdjustment,
+  applyWorkoutAdjustment,
+  getExerciseDetail,
+  getLatestPlan,
+} from '../api'
 import type { CheckinResponse, ReviewResponse } from '../types'
 import { sanitizeHtml } from '../utils/sanitize'
 import gsap from 'gsap'
@@ -102,6 +109,115 @@ async function applyAdjustment() {
 function dismissAdjustment() {
   if (!review.value) return
   review.value = { ...review.value, calorie_adjustment: null }
+  saveReviewToStorage(review.value)
+}
+
+// 训练调整草案：应用（确认写入）或忽略
+const applyingWorkoutAdjust = ref(false)
+
+async function applyWorkoutAdjust() {
+  const adj = review.value?.workout_adjustment
+  if (!adj) return
+  if (applyingWorkoutAdjust.value) return
+  applyingWorkoutAdjust.value = true
+  const userId = Number(localStorage.getItem('userId'))
+
+  // 读取当前计划的 workout_plan_json，应用调整后写回
+  try {
+    const planRes = await getLatestPlan(userId)
+    if (!planRes?.workout_plan_json) {
+      ElMessage.error('未找到当前训练计划')
+      return
+    }
+
+    const baseWorkoutPlanJson = planRes.workout_plan_json
+    const workout = JSON.parse(baseWorkoutPlanJson)
+
+    const workoutDays = Array.isArray(workout.weekly_plan) ? workout.weekly_plan : []
+    const exerciseIds: string[] = [...new Set<string>(
+      workoutDays.flatMap((day: any) => (day.exercises || []).map((ex: any) => ex.exercise_id))
+        .filter((id: unknown): id is string => typeof id === 'string' && id !== 'manual')
+    )]
+    const details = new Map<string, Awaited<ReturnType<typeof getExerciseDetail>>>()
+    await Promise.all(exerciseIds.map(async id => {
+      try { details.set(id, await getExerciseDetail(id)) }
+      catch { /* ID 本身仍可作为降级匹配字段 */ }
+    }))
+
+    const appliesToDay = (changeDay: string, day: number) =>
+      changeDay === 'all' || changeDay === String(day)
+    let mutationCount = 0
+    let hasReplacementFlag = false
+
+    // 应用调整；每条变更都尊重 day 范围，并统计实际修改数量。
+    for (const change of adj.changes) {
+      if (change.action === 'replace' && change.old_exercise_keyword) {
+        const keyword = change.old_exercise_keyword.toLowerCase()
+        for (const day of workoutDays) {
+          if (!appliesToDay(change.day, day.day)) continue
+          for (const ex of day.exercises || []) {
+            const detail = details.get(ex.exercise_id)
+            const searchable = [ex.exercise_id, detail?.name, detail?.name_zh]
+              .filter(Boolean).join(' ').toLowerCase()
+            if (searchable.includes(keyword)) {
+              ex._flagged_for_replacement = change.reason
+              mutationCount++
+              hasReplacementFlag = true
+            }
+          }
+        }
+      } else if (change.action === 'reduce_volume') {
+        for (const day of workoutDays) {
+          if (!appliesToDay(change.day, day.day)) continue
+          for (const ex of day.exercises || []) {
+            if (ex.sets && ex.sets > 1) { ex.sets -= 1; mutationCount++ }
+          }
+        }
+      } else if (change.action === 'increase_cardio') {
+        for (const day of workoutDays) {
+          if (!appliesToDay(change.day, day.day) || ['rest', '休息'].includes(day.theme)) continue
+          if (day.cardio) {
+            if (day.cardio.duration_minutes < 300) {
+              day.cardio.duration_minutes = Math.min((day.cardio.duration_minutes || 20) + 10, 300)
+              mutationCount++
+            }
+          } else {
+            day.cardio = { type: 'brisk_walk', duration_minutes: 20, intensity: 'moderate' }
+            mutationCount++
+          }
+        }
+      } else if (change.action === 'increase_volume') {
+        for (const day of workoutDays) {
+          if (appliesToDay(change.day, day.day) && !['rest', '休息'].includes(day.theme)) {
+            for (const ex of day.exercises || []) {
+              if (ex.sets && ex.sets < 20) { ex.sets += 1; mutationCount++ }
+            }
+          }
+        }
+      }
+    }
+
+    if (mutationCount === 0) {
+      ElMessage.error('当前计划没有可应用的训练调整，请重新生成复盘')
+      return
+    }
+
+    await applyWorkoutAdjustment(userId, planRes.id, baseWorkoutPlanJson, JSON.stringify(workout))
+    ElMessage.success(hasReplacementFlag ? '训练量已更新，需替换动作已在计划中标记' : '训练计划已调整')
+    if (review.value) {
+      review.value = { ...review.value, workout_adjustment: null }
+      saveReviewToStorage(review.value)
+    }
+  } catch (err: any) {
+    ElMessage.error(err.response?.data?.detail || '调整失败，请稍后重试')
+  } finally {
+    applyingWorkoutAdjust.value = false
+  }
+}
+
+function dismissWorkoutAdjust() {
+  if (!review.value) return
+  review.value = { ...review.value, workout_adjustment: null }
   saveReviewToStorage(review.value)
 }
 
@@ -220,6 +336,31 @@ onMounted(() => {
           </div>
         </div>
 
+        <!-- 训练调整草案：基于打卡/伤病/平台期的闭环建议，确认后才写入计划 -->
+        <div class="adjust-card adjust-card--workout" v-if="review.workout_adjustment">
+          <div class="adjust-main">
+            <h3 class="review-card-title">训练计划调整建议</h3>
+            <p class="adjust-reason">{{ review.workout_adjustment.reason }}</p>
+            <div class="workout-changes">
+              <div v-for="(change, i) in review.workout_adjustment.changes" :key="i" class="workout-change-item">
+                <span class="change-action">{{ change.action }}</span>
+                <span class="change-detail" v-if="change.detail">{{ change.detail }}</span>
+                <span class="change-detail" v-else-if="change.old_exercise_keyword">替换: {{ change.old_exercise_keyword }}</span>
+                <span class="change-reason">{{ change.reason }}</span>
+              </div>
+            </div>
+            <div v-if="review.workout_adjustment.risk_notes?.length" class="adjust-risk-notes">
+              <span v-for="(note, i) in review.workout_adjustment.risk_notes" :key="i">⚠️ {{ note }}</span>
+            </div>
+          </div>
+          <div class="adjust-actions">
+            <button class="btn btn-sm btn-primary" :disabled="applyingWorkoutAdjust" @click="applyWorkoutAdjust">
+              {{ applyingWorkoutAdjust ? '应用中...' : '应用调整' }}
+            </button>
+            <button class="btn btn-sm btn-ghost" @click="dismissWorkoutAdjust">忽略</button>
+          </div>
+        </div>
+
         <div class="review-grid">
           <div class="review-card">
             <h3 class="review-card-title">复盘总结</h3>
@@ -313,6 +454,54 @@ onMounted(() => {
   flex-direction: column;
   gap: var(--space-2);
   flex-shrink: 0;
+}
+
+/* 训练调整卡片 */
+.adjust-card--workout {
+  border-color: var(--color-accent);
+}
+
+.workout-changes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.workout-change-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.change-action {
+  font-weight: 600;
+  color: var(--color-accent);
+  text-transform: uppercase;
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+}
+
+.change-detail {
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+
+.change-reason {
+  color: var(--color-text-secondary);
+  width: 100%;
+  font-size: var(--text-xs);
+}
+
+.adjust-risk-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--color-warning);
 }
 
 @media (max-width: 480px) {

@@ -1,16 +1,18 @@
 """餐食热量识别 API"""
 import json
 import logging
+import math
 import uuid
+from datetime import date as calendar_date
 from pathlib import Path
 from typing import List, Optional
 from pydantic import BaseModel
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, or_
 from app.core.database import get_db
 from app.core.time import today_str
-from app.models.user import User, MealLog, MealRecognition
+from app.models.user import User, MealLog, MealRecognition, Food
 from app.services.image_utils import (
     image_extension,
     validate_image,
@@ -38,6 +40,134 @@ def _detect_image_mime(image_bytes: bytes, filename: str | None, content_type: s
 
 def _today() -> str:
     return today_str()
+
+
+def _finite_number(value: object, field: str, maximum: float) -> float:
+    """将模型数值收紧为有限且非负的浮点数。"""
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a number")
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a number") from exc
+    if not math.isfinite(number) or number < 0 or number > maximum:
+        raise ValueError(f"{field} is out of range")
+    return number
+
+
+def _normalize_meal_items(raw_items: object) -> list[dict]:
+    """验证并规范 Vision Model 返回的餐食条目。"""
+    if not isinstance(raw_items, list) or not 1 <= len(raw_items) <= 20:
+        raise ValueError("meal items must be a non-empty list")
+
+    normalized = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            raise ValueError("meal item must be an object")
+        dish_name = raw.get("dish_name") or raw.get("name")
+        if not isinstance(dish_name, str) or not dish_name.strip() or len(dish_name.strip()) > 100:
+            raise ValueError("dish_name is invalid")
+        portion_value = raw.get("estimated_portion_g", raw.get("estimated_weight_g"))
+        portion_g = _finite_number(portion_value, "estimated_portion_g", 5000)
+        if portion_g <= 0:
+            raise ValueError("estimated_portion_g must be positive")
+
+        item = dict(raw)
+        item["dish_name"] = dish_name.strip()
+        item["estimated_portion_g"] = portion_g
+        for field, maximum in (
+            ("calories_kcal", 10000),
+            ("protein_g", 2000),
+            ("carbs_g", 2000),
+            ("fat_g", 2000),
+        ):
+            if field not in raw:
+                raise ValueError(f"{field} is required")
+            item[field] = _finite_number(raw[field], field, maximum)
+        normalized.append(item)
+    return normalized
+
+
+def _stored_name_values(value: str | None) -> list[str]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, list):
+            return [str(item).strip().casefold() for item in parsed if str(item).strip()]
+    except (TypeError, json.JSONDecodeError):
+        pass
+    return [part.strip().casefold() for part in value.split(",") if part.strip()]
+
+
+def _food_match_rank(food: Food, dish_name: str) -> tuple[int, int]:
+    """精确成品名优先，避免 common_dishes 中的原料抢占匹配。"""
+    needle = dish_name.strip().casefold()
+    name = (food.name_zh or "").strip().casefold()
+    aliases = _stored_name_values(food.aliases)
+    common_dishes = _stored_name_values(food.common_dishes)
+    if name == needle:
+        return (0, food.id)
+    if needle in aliases:
+        return (1, food.id)
+    if needle in common_dishes:
+        return (2, food.id)
+    if needle in name:
+        return (3, food.id)
+    if any(needle in alias for alias in aliases):
+        return (4, food.id)
+    return (5, food.id)
+
+
+async def _anchor_food_database(
+    db: AsyncSession,
+    items: list[dict],
+) -> list[dict]:
+    """将 LLM 识别的菜品锚定到食物数据库。
+
+    命中：用数据库每 100g 营养 × 份量计算，标注 is_from_database: true
+    未命中：保留 LLM 估算值，标注 is_from_database: false
+    """
+    if not items:
+        return items
+
+    for item in items:
+        dish_name = item.get("dish_name", "") or item.get("name", "")
+        portion_g = item.get("estimated_portion_g", 0) or item.get("estimated_weight_g", 0)
+
+        if not dish_name or portion_g <= 0:
+            item["is_from_database"] = False
+            item["data_source"] = "估算值"
+            continue
+
+        # 先取有限候选，再按“精确成品名 > 别名 > 常见菜品 > 模糊包含”排序。
+        stmt = select(Food).where(
+            or_(
+                Food.name_zh.ilike(f"%{dish_name}%"),
+                Food.aliases.ilike(f"%{dish_name}%"),
+                Food.common_dishes.ilike(f"%{dish_name}%"),
+            )
+        ).limit(50)
+        result = await db.execute(stmt)
+        candidates = result.scalars().all()
+        food = min(candidates, key=lambda candidate: _food_match_rank(candidate, dish_name)) if candidates else None
+
+        if food:
+            # 用数据库每 100g 营养 × 份量重新计算
+            ratio = portion_g / 100.0
+            item["calories_kcal"] = round(food.calories_kcal * ratio, 1)
+            item["protein_g"] = round(food.protein_g * ratio, 1)
+            item["carbs_g"] = round(food.carbs_g * ratio, 1)
+            item["fat_g"] = round(food.fat_g * ratio, 1)
+            item["is_from_database"] = True
+            item["data_source"] = f"数据库参考值（{food.name_zh}）"
+            item["matched_food_id"] = food.id
+            item["matched_food_name"] = food.name_zh
+        else:
+            item["is_from_database"] = False
+            item["data_source"] = "估算值，未在数据库中"
+
+    return items
 
 
 class IngredientItem(BaseModel):
@@ -83,9 +213,11 @@ async def analyze_meal(
     # 调用 Vision Model 识别菜品（使用公共接口，统一 prompt）
     # 失败时明确报错：不写入伪造数据污染用户的饮食记录
     try:
-        items = await recognize_food_items(content, mime_type=mime_type, mode="dish")
-        if not items:
-            raise ValueError("Vision Model 未识别到任何菜品")
+        items = _normalize_meal_items(
+            await recognize_food_items(content, mime_type=mime_type, mode="dish")
+        )
+        # 锚定也在清理保护范围内；失败时不会遗留孤立上传文件。
+        items = await _anchor_food_database(db, items)
     except Exception:
         logger.exception(
             "Vision Model dish recognition failed. user_id=%s saved_path=%s",
@@ -336,6 +468,7 @@ async def calculate_meal(
             json_end = raw.rfind("}") + 1
             raw = raw[json_start:json_end]
         nutrition = json.loads(raw)
+        items = _normalize_meal_items(nutrition.get("items"))
     except Exception:
         # 营养计算失败：明确报错；识别记录保留在数据库中，用户可直接重试。
         # 不用拍脑袋的启发式数值冒充真实营养数据落库
@@ -345,13 +478,16 @@ async def calculate_meal(
         )
         raise HTTPException(status_code=502, detail="营养计算失败，请点击重试")
 
+    # 锚定食物数据库：命中用数据库营养，未命中保留 LLM 估算
+    items = await _anchor_food_database(db, items)
+
+    # 重新计算本餐总营养（优先使用数据库锚定后的值）
     meal_total = {
-        "calories_kcal": nutrition.get("calories_kcal", 0),
-        "protein_g": nutrition.get("protein_g", 0),
-        "carbs_g": nutrition.get("carbs_g", 0),
-        "fat_g": nutrition.get("fat_g", 0),
+        "calories_kcal": round(sum(i.get("calories_kcal", 0) for i in items), 1),
+        "protein_g": round(sum(i.get("protein_g", 0) for i in items), 1),
+        "carbs_g": round(sum(i.get("carbs_g", 0) for i in items), 1),
+        "fat_g": round(sum(i.get("fat_g", 0) for i in items), 1),
     }
-    items = nutrition.get("items", [])
 
     # 计算每日热量缺口
     today = _today()
@@ -453,14 +589,26 @@ async def get_daily_summary(
 
     if not date:
         date = _today()
+    else:
+        try:
+            parsed_date = calendar_date.fromisoformat(date)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="日期格式必须为 YYYY-MM-DD") from exc
+        if parsed_date.isoformat() != date:
+            raise HTTPException(status_code=400, detail="日期格式必须为 YYYY-MM-DD")
 
     existing = await db.execute(
-        select(MealLog).where(MealLog.user_id == user_id, MealLog.date == date)
+        select(MealLog)
+        .where(MealLog.user_id == user_id, MealLog.date == date)
+        .order_by(MealLog.created_at, MealLog.id)
     )
     today_meals = existing.scalars().all()
 
     grouped = {meal_type: None for meal_type in MEAL_TYPES}
     for meal in today_meals:
+        if meal.meal_type not in grouped:
+            logger.warning("Ignoring unsupported stored meal type: meal_id=%s type=%r", meal.id, meal.meal_type)
+            continue
         meal_total = json.loads(meal.meal_total_json) if meal.meal_total_json else {}
         items = json.loads(meal.items_json) if meal.items_json else []
         image_url = f"/uploads/meals/{Path(meal.image_path).name}" if meal.image_path else ""

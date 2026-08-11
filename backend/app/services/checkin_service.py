@@ -8,6 +8,7 @@ from app.schemas.checkin import (
     CheckinCreate,
     CheckinResponse,
     ReviewResponse,
+    WorkoutAdjustment,
 )
 from app.graph.workflow import run_review_workflow
 from app.services.adjustment_service import compute_calorie_adjustment
@@ -121,12 +122,12 @@ async def get_user_review(db: AsyncSession, user_id: int) -> ReviewResponse:
         "prep_time_limit_minutes": user.prep_time_limit_minutes,
     }
 
-    # 获取最近打卡记录
+    # 获取最近 21 条记录，使“两周平台期”规则在每日打卡场景下可达。
     result = await db.execute(
         select(Checkin)
         .where(Checkin.user_id == user_id)
         .order_by(desc(Checkin.date))
-        .limit(7)
+        .limit(21)
     )
     checkins = result.scalars().all()
 
@@ -166,6 +167,10 @@ async def get_user_review(db: AsyncSession, user_id: int) -> ReviewResponse:
     # 闭环：基于体重趋势计算热量调整草案（仅建议，确认后才写入）
     adjustment = await _build_calorie_adjustment(db, user)
 
+    # 训练调整草案
+    workout_adj_data = review_result.get("workout_adjustment")
+    workout_adjustment = WorkoutAdjustment(**workout_adj_data) if workout_adj_data else None
+
     return ReviewResponse(
         user_id=user_id,
         checkin_count=len(checkins),
@@ -173,6 +178,7 @@ async def get_user_review(db: AsyncSession, user_id: int) -> ReviewResponse:
         review_summary=review_result["review_summary"],
         next_day_advice=review_result["next_day_advice"],
         calorie_adjustment=adjustment,
+        workout_adjustment=workout_adjustment,
     )
 
 

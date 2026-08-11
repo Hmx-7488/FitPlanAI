@@ -64,8 +64,16 @@ export interface PlanResponse {
   meal_plan_json?: string | null
   workout_plan: string
   workout_plan_json?: string | null
+  supplements_json?: string | null
   summary: string
   created_at?: string
+}
+
+export interface WorkoutAdjustRequest {
+  user_id: number
+  plan_id: number
+  base_workout_plan_json: string
+  adjusted_workout_plan_json: string
 }
 
 export interface WorkoutExercise {
@@ -73,6 +81,7 @@ export interface WorkoutExercise {
   sets: number
   reps: string
   rest_seconds: number
+  _flagged_for_replacement?: string
 }
 
 export interface WorkoutDay {
@@ -120,6 +129,16 @@ export interface StructuredMealPlan {
   tips?: string[]
 }
 
+// 补剂推荐
+export interface SupplementRecommendation {
+  name: string
+  name_en: string
+  reason: string
+  dosage: string
+  timing: string
+  contraindications: string[]
+}
+
 // 打卡相关
 export interface CheckinData {
   user_id: number
@@ -150,6 +169,20 @@ export interface CalorieAdjustment {
   basis: string
 }
 
+export interface WorkoutAdjustmentChange {
+  day: string
+  action: string
+  old_exercise_keyword?: string
+  detail?: string
+  reason: string
+}
+
+export interface WorkoutAdjustment {
+  reason: string
+  changes: WorkoutAdjustmentChange[]
+  risk_notes: string[]
+}
+
 export interface ReviewResponse {
   user_id: number
   checkin_count: number
@@ -157,6 +190,7 @@ export interface ReviewResponse {
   review_summary: string
   next_day_advice: string
   calorie_adjustment?: CalorieAdjustment | null
+  workout_adjustment?: WorkoutAdjustment | null
 }
 
 // Agent 追问响应
@@ -395,7 +429,7 @@ export interface PoseAnalysis {
 }
 
 // 餐食热量识别
-export interface MealItem {
+export interface MealRecognitionItem {
   dish_name: string
   estimated_portion_g: number
   calories_kcal: number
@@ -404,6 +438,10 @@ export interface MealItem {
   fat_g: number
   confidence?: number
   need_confirm?: boolean
+  is_from_database?: boolean
+  data_source?: string
+  matched_food_id?: number
+  matched_food_name?: string
 }
 
 export interface DailySummary {
@@ -418,7 +456,7 @@ export interface DailySummary {
 
 export interface MealAnalysis {
   meal_type: string
-  items: MealItem[]
+  items: MealRecognitionItem[]
   meal_total: {
     calories_kcal: number
     protein_g: number
@@ -450,7 +488,7 @@ export interface MealDailySummary {
     id: number
     meal_type: string
     image_url: string
-    items: MealItem[]
+    items: MealRecognitionItem[]
     meal_total: MealAnalysis['meal_total']
     created_at?: string
   } | null>

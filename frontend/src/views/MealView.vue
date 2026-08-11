@@ -452,7 +452,11 @@ function statusLabel(status: string): string {
       <div class="items-card" v-if="result.items.length">
         <h3>识别菜品</h3>
         <div v-for="(item, i) in result.items" :key="i" class="item-row">
-          <span class="item-name">{{ item.dish_name }}</span>
+          <div class="item-info">
+            <span class="item-name">{{ item.dish_name }}</span>
+            <span class="item-source" v-if="item.is_from_database">📊 {{ item.data_source }}</span>
+            <span class="item-source item-source--estimate" v-else>🔍 {{ item.data_source || '估算值' }}</span>
+          </div>
           <span class="item-portion">{{ item.estimated_portion_g }}g</span>
           <span class="item-cal">{{ item.calories_kcal }} kcal</span>
         </div>
@@ -634,7 +638,10 @@ function statusLabel(status: string): string {
 .items-card h3 { font-size: var(--text-md); font-weight: 700; margin-bottom: var(--space-3); }
 .item-row { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) 0; border-bottom: 1px solid var(--color-border-subtle); }
 .item-row:last-child { border-bottom: none; }
-.item-name { flex: 1; font-weight: 600; color: var(--color-text-primary); }
+.item-info { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.item-name { font-weight: 600; color: var(--color-text-primary); }
+.item-source { font-size: var(--text-xs); color: var(--color-accent); }
+.item-source--estimate { color: var(--color-text-tertiary); }
 .item-portion { font-size: var(--text-sm); color: var(--color-text-tertiary); font-family: var(--font-mono); }
 .item-cal { font-size: var(--text-sm); font-weight: 600; color: var(--color-accent); font-family: var(--font-mono); }
 .item-confidence { font-size: var(--text-xs); color: var(--color-text-tertiary); padding: 1px 6px; background: var(--color-surface); border: 1px solid var(--color-border-subtle); border-radius: 4px; }

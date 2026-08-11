@@ -3,7 +3,7 @@ import { ref, onMounted, computed, nextTick, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getLatestPlan, generatePlan, getExerciseDetail, type ExerciseDetail } from '../api'
-import type { PlanResponse, NeedInfoResponse, StructuredWorkoutPlan, StructuredMealPlan } from '../types'
+import type { PlanResponse, NeedInfoResponse, StructuredWorkoutPlan, StructuredMealPlan, SupplementRecommendation } from '../types'
 import { sanitizeHtml } from '../utils/sanitize'
 import gsap from 'gsap'
 
@@ -140,6 +140,17 @@ const structuredMeal = computed<StructuredMealPlan | null>(() => {
     return JSON.parse(plan.value.meal_plan_json) as StructuredMealPlan
   } catch {
     return null
+  }
+})
+
+/** 解析补剂推荐 JSON */
+const supplements = computed<SupplementRecommendation[]>(() => {
+  if (!plan.value?.supplements_json) return []
+  try {
+    const data = JSON.parse(plan.value.supplements_json)
+    return Array.isArray(data) ? data as SupplementRecommendation[] : []
+  } catch {
+    return []
   }
 })
 
@@ -332,8 +343,9 @@ onMounted(async () => {
             v-for="tab in [
               { key: 'meal', label: '饮食计划' },
               { key: 'workout', label: '运动计划' },
+              { key: 'supplements', label: '补剂推荐', show: supplements.length > 0 },
               { key: 'summary', label: '总结建议' },
-            ]"
+            ].filter(t => t.show !== false)"
             :key="tab.key"
             class="tab-btn"
             :class="{ 'tab-btn--active': activeTab === tab.key }"
@@ -456,7 +468,12 @@ onMounted(async () => {
                   </span>
                   <span class="exercise-sets">{{ ex.sets }} × {{ ex.reps }}</span>
                   <span class="exercise-rest" v-if="ex.rest_seconds">{{ ex.rest_seconds }}s休息</span>
+                  <span class="exercise-replace-flag" v-if="ex._flagged_for_replacement">需替换</span>
                   <span class="exercise-toggle">{{ expandedExercises.has(ex.exercise_id) ? '▾' : '▸' }}</span>
+                </div>
+
+                <div v-if="ex._flagged_for_replacement" class="exercise-replace-note">
+                  {{ ex._flagged_for_replacement }}。请暂停该动作并选择无痛替代动作。
                 </div>
 
                 <div v-if="expandedExercises.has(ex.exercise_id)" class="exercise-detail">
@@ -501,6 +518,36 @@ onMounted(async () => {
           <div v-if="structuredWorkout.notes?.length" class="workout-extras">
             <h4>注意事项</h4>
             <ul><li v-for="(n, i) in structuredWorkout.notes" :key="i">{{ n }}</li></ul>
+          </div>
+        </div>
+
+        <!-- 补剂推荐 -->
+        <div v-else-if="activeTab === 'supplements' && supplements.length > 0" class="supplements-section">
+          <div class="supplements-disclaimer">
+            <span>⚠️ 补剂推荐仅供参考，不构成医疗建议。有慢性疾病或服药者请咨询医生。</span>
+          </div>
+          <div class="supplement-cards">
+            <div v-for="(supp, i) in supplements" :key="i" class="supplement-card">
+              <div class="supplement-header">
+                <h4 class="supplement-name">{{ supp.name }}</h4>
+                <span class="supplement-en" v-if="supp.name_en">{{ supp.name_en }}</span>
+              </div>
+              <p class="supplement-reason">{{ supp.reason }}</p>
+              <div class="supplement-details">
+                <div class="supplement-detail">
+                  <span class="detail-label">剂量</span>
+                  <span class="detail-value">{{ supp.dosage }}</span>
+                </div>
+                <div class="supplement-detail">
+                  <span class="detail-label">时机</span>
+                  <span class="detail-value">{{ supp.timing }}</span>
+                </div>
+              </div>
+              <div class="supplement-contraindications" v-if="supp.contraindications?.length > 0">
+                <span class="contra-label">禁忌：</span>
+                <span class="contra-text">{{ supp.contraindications.join('、') }}</span>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -1132,6 +1179,25 @@ onMounted(async () => {
   color: var(--color-text-tertiary);
 }
 
+.exercise-replace-flag {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--color-warning-subtle, #fff4df);
+  color: var(--color-warning, #9a5b00);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.exercise-replace-note {
+  margin: 0 var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-left: 3px solid var(--color-warning, #c77b16);
+  background: var(--color-warning-subtle, #fff8e8);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+}
+
 .exercise-toggle {
   font-size: var(--text-sm);
   color: var(--color-text-tertiary);
@@ -1243,6 +1309,99 @@ onMounted(async () => {
   font-size: var(--text-sm);
   color: var(--color-text-secondary);
   margin-bottom: var(--space-1);
+}
+
+/* 补剂推荐 */
+.supplements-disclaimer {
+  background: var(--color-warning-bg, #fff8e1);
+  border: 1px solid var(--color-warning, #ff9800);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.supplement-cards {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.supplement-card {
+  background: var(--color-surface-2, #f9fafb);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4) var(--space-5);
+}
+
+.supplement-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.supplement-name {
+  font-size: var(--text-lg);
+  font-weight: 700;
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+.supplement-en {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.supplement-reason {
+  font-size: var(--text-sm);
+  color: var(--color-text-primary);
+  margin-bottom: var(--space-3);
+  line-height: 1.6;
+}
+
+.supplement-details {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.supplement-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.detail-label {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.detail-value {
+  font-size: var(--text-sm);
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+
+.supplement-contraindications {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+}
+
+.contra-label {
+  color: var(--color-warning, #d97706);
+  font-weight: 600;
+}
+
+@media (max-width: 640px) {
+  .supplement-details {
+    grid-template-columns: 1fr;
+  }
 }
 
 /* Structured meal plan */

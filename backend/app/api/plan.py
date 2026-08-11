@@ -1,10 +1,11 @@
 import json
+from pydantic import ValidationError
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
-from app.models.user import Plan, User
+from app.models.user import Exercise, Plan, User
 from app.schemas.plan import (
     CalorieAdjustRequest,
     PlanGenerateRequest,
@@ -12,6 +13,8 @@ from app.schemas.plan import (
     NeedInfoResponse,
     CalorieInfo,
     MacrosInfo,
+    WorkoutAdjustRequest,
+    WorkoutPlanData,
 )
 from app.services.plan_service import generate_plan
 from app.tools.calorie_tools import calc_macros
@@ -47,6 +50,7 @@ def _to_plan_response(plan: Plan) -> PlanResponse:
         meal_plan_json=plan.meal_plan_json if plan.meal_plan_json else None,
         workout_plan=plan.workout_plan,
         workout_plan_json=plan.workout_plan_json if plan.workout_plan_json else None,
+        supplements_json=plan.supplements_json if plan.supplements_json else None,
         summary=plan.summary,
         created_at=plan.created_at,
     )
@@ -58,7 +62,12 @@ async def get_latest_plan(
     db: AsyncSession = Depends(get_db),
 ):
     """获取用户最新的计划"""
-    stmt = select(Plan).where(Plan.user_id == user_id).order_by(desc(Plan.created_at)).limit(1)
+    stmt = (
+        select(Plan)
+        .where(Plan.user_id == user_id)
+        .order_by(desc(Plan.created_at), desc(Plan.id))
+        .limit(1)
+    )
     result = await db.execute(stmt)
     plan = result.scalar_one_or_none()
     if not plan:
@@ -89,7 +98,6 @@ async def adjust_calories(
     plan = (await db.execute(stmt)).scalar_one_or_none()
     if not plan:
         raise HTTPException(status_code=404, detail="请先生成计划")
-
     new_target = request.daily_calorie_target
     plan.daily_calorie_target = new_target
 
@@ -104,6 +112,7 @@ async def adjust_calories(
         user.weight,
         user.activity_level or "medium",
         user.goal_type or "fat_loss",
+        user.diet_preference or "balanced",
     )
     plan.macros_json = json.dumps(macros, ensure_ascii=False)
 
@@ -131,3 +140,89 @@ async def generate_fat_loss_plan(
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"生成计划失败: {str(e)}")
+
+
+@router.post("/adjust-workout", response_model=PlanResponse)
+async def adjust_workout(
+    request: WorkoutAdjustRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """用户确认训练调整草案后写入 workout_plan_json。
+
+    闭环的写入端：复盘产生的训练调整草案经用户确认后调用本接口。
+    """
+    user = await db.get(User, request.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    stmt = (
+        select(Plan)
+        .where(Plan.user_id == request.user_id)
+        .order_by(desc(Plan.created_at), desc(Plan.id))
+        .limit(1)
+    )
+    plan = (await db.execute(stmt)).scalar_one_or_none()
+    if not plan:
+        raise HTTPException(status_code=404, detail="请先生成计划")
+    if plan.id != request.plan_id:
+        raise HTTPException(status_code=409, detail="训练计划已更新，请刷新后重新应用调整")
+
+    # 将浏览器提交的 JSON 当作不可信输入，完整验证嵌套结构和数值范围。
+    try:
+        adjusted = json.loads(request.adjusted_workout_plan_json)
+        validated = WorkoutPlanData.model_validate(adjusted)
+    except (json.JSONDecodeError, ValidationError) as e:
+        raise HTTPException(status_code=400, detail=f"无效的训练计划 JSON: {e}")
+
+    submitted_ids = {
+        exercise.exercise_id
+        for day in validated.weekly_plan
+        for exercise in day.exercises
+        if exercise.exercise_id != "manual"
+    }
+    if submitted_ids:
+        known_ids = set((await db.execute(
+            select(Exercise.id).where(Exercise.id.in_(submitted_ids))
+        )).scalars().all())
+        unknown_ids = sorted(submitted_ids - known_ids)
+        if unknown_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"训练计划包含不存在的动作 ID: {', '.join(unknown_ids[:5])}",
+            )
+
+    adjusted_workout_plan_json = validated.model_dump_json(exclude_none=True, by_alias=True)
+
+    # 同步更新文本版本
+    text_lines = []
+    for day in validated.weekly_plan:
+        day_label = f"Day {day.day}"
+        if day.theme == "rest":
+            text_lines.append(f"**{day_label}** rest")
+            continue
+        ex_names = []
+        for ex in day.exercises:
+            ex_names.append(f"{ex.exercise_id} {ex.sets}x{ex.reps}")
+        cardio = day.cardio
+        cardio_text = f" / cardio: {cardio.type} {cardio.duration_minutes}min" if cardio else ""
+        text_lines.append(f"**{day_label}** {day.theme}: {' / '.join(ex_names)}{cardio_text}")
+    adjusted_workout_plan = "\n".join(text_lines) if text_lines else plan.workout_plan
+
+    result = await db.execute(
+        update(Plan)
+        .where(
+            Plan.id == request.plan_id,
+            Plan.user_id == request.user_id,
+            Plan.workout_plan_json == request.base_workout_plan_json,
+        )
+        .values(
+            workout_plan_json=adjusted_workout_plan_json,
+            workout_plan=adjusted_workout_plan,
+        )
+    )
+    if result.rowcount != 1:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="训练计划已更新，请刷新后重新应用调整")
+    await db.commit()
+    await db.refresh(plan)
+    return _to_plan_response(plan)
