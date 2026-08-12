@@ -35,6 +35,7 @@ def _ensure_additive_columns(sync_conn) -> None:
         },
         "user_memories": {
             "active_slot": "ALTER TABLE user_memories ADD COLUMN active_slot VARCHAR(80)",
+            "index_revision": "ALTER TABLE user_memories ADD COLUMN index_revision INTEGER NOT NULL DEFAULT 0",
         },
     }
     for table, columns in migrations.items():

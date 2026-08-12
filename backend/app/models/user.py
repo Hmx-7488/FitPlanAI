@@ -281,6 +281,8 @@ class UserMemory(Base):
     content_json: Mapped[str] = mapped_column(Text, default="{}")
     content_text: Mapped[str] = mapped_column(Text)
     content_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    # Monotonic content/lifecycle version used to reject stale embeddings.
+    index_revision: Mapped[int] = mapped_column(Integer, default=0)
     source_conversation_id: Mapped[int] = mapped_column(
         Integer, nullable=True, index=True
     )
@@ -322,3 +324,76 @@ class UserMemoryAudit(Base):
     after_json: Mapped[str] = mapped_column(Text, default="{}")
     actor: Mapped[str] = mapped_column(String(20), default="system")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class UserMemoryIndexOutbox(Base):
+    """Durable, content-free synchronization request for the memory index."""
+    __tablename__ = "user_memory_index_outbox"
+    __table_args__ = (
+        UniqueConstraint(
+            "memory_id",
+            "index_revision",
+            name="uq_user_memory_index_outbox_revision",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    memory_id: Mapped[int] = mapped_column(Integer, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    operation: Mapped[str] = mapped_column(String(20))
+    index_revision: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    available_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    lease_owner: Mapped[str] = mapped_column(String(80), nullable=True)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    last_error_code: Mapped[str] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    processed_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+
+
+class UserMemoryRetrievalRun(Base):
+    """Content-free diagnostics for one memory retrieval operation."""
+    __tablename__ = "user_memory_retrieval_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    consumer: Mapped[str] = mapped_column(String(20), index=True)
+    conversation_id: Mapped[int] = mapped_column(Integer, nullable=True, index=True)
+    source_message_id: Mapped[int] = mapped_column(Integer, nullable=True, index=True)
+    plan_id: Mapped[int] = mapped_column(Integer, nullable=True, index=True)
+    query_hash: Mapped[str] = mapped_column(String(64))
+    requested_mode: Mapped[str] = mapped_column(String(20))
+    effective_mode: Mapped[str] = mapped_column(String(20))
+    degraded_reason: Mapped[str] = mapped_column(String(80), nullable=True)
+    keyword_candidate_count: Mapped[int] = mapped_column(Integer, default=0)
+    vector_candidate_count: Mapped[int] = mapped_column(Integer, default=0)
+    stale_filtered_count: Mapped[int] = mapped_column(Integer, default=0)
+    embedding_model: Mapped[str] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class UserMemoryRetrievalHit(Base):
+    """Per-memory ranks plus whether it was actually included in model context."""
+    __tablename__ = "user_memory_retrieval_hits"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "memory_id",
+            name="uq_user_memory_retrieval_hit",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(36), index=True)
+    memory_id: Mapped[int] = mapped_column(Integer, index=True)
+    channels_json: Mapped[str] = mapped_column(Text, default="[]")
+    keyword_rank: Mapped[int] = mapped_column(Integer, nullable=True)
+    keyword_score: Mapped[float] = mapped_column(Float, nullable=True)
+    vector_rank: Mapped[int] = mapped_column(Integer, nullable=True)
+    vector_score: Mapped[float] = mapped_column(Float, nullable=True)
+    fused_rank: Mapped[int] = mapped_column(Integer)
+    rrf_score: Mapped[float] = mapped_column(Float)
+    final_rank: Mapped[int] = mapped_column(Integer)
+    included_in_context: Mapped[bool] = mapped_column(default=False, index=True)
+    included_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)

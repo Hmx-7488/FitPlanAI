@@ -103,6 +103,17 @@ class Settings(BaseSettings):
     CHAT_MEMORY_RECALL_LIMIT: int = 12
     CHAT_MEMORY_RECALL_CANDIDATE_LIMIT: int = 100
     CHAT_MEMORY_AUTO_CONFIRM_MIN_CONFIDENCE: float = 0.8
+    MEMORY_RETRIEVAL_MODE: str = "hybrid"
+    MEMORY_VECTOR_ENABLED: bool = True
+    MEMORY_EMBEDDING_MODEL: str = "text-embedding-v3"
+    MEMORY_VECTOR_COLLECTION: str = "slim_agent_user_memory_v1"
+    MEMORY_VECTOR_CANDIDATE_LIMIT: int = 40
+    MEMORY_KEYWORD_CANDIDATE_LIMIT: int = 100
+    MEMORY_HEALTH_RECALL_LIMIT: int = 4
+    MEMORY_RRF_K: int = 60
+    MEMORY_INDEX_BATCH_SIZE: int = 20
+    MEMORY_INDEX_MAX_ATTEMPTS: int = 5
+    MEMORY_INDEX_RETRY_BASE_SECONDS: int = 5
     # 非 development 环境下，记忆 API 必须由可信反向代理注入该密钥。
     MEMORY_API_ACCESS_KEY: str = ""
     # 允许的前端来源，逗号分隔；默认仅本地开发端口
@@ -179,6 +190,24 @@ class Settings(BaseSettings):
             raise ValueError(
                 "CHAT_MEMORY_AUTO_CONFIRM_MIN_CONFIDENCE must be between 0 and 1"
             )
+        if self.MEMORY_RETRIEVAL_MODE not in {"keyword", "vector", "hybrid"}:
+            raise ValueError("MEMORY_RETRIEVAL_MODE must be keyword, vector, or hybrid")
+        if self.MEMORY_VECTOR_CANDIDATE_LIMIT <= 0:
+            raise ValueError("MEMORY_VECTOR_CANDIDATE_LIMIT must be positive")
+        if self.MEMORY_KEYWORD_CANDIDATE_LIMIT < self.CHAT_MEMORY_RECALL_LIMIT:
+            raise ValueError(
+                "MEMORY_KEYWORD_CANDIDATE_LIMIT must be at least recall limit"
+            )
+        if self.MEMORY_HEALTH_RECALL_LIMIT <= 0:
+            raise ValueError("MEMORY_HEALTH_RECALL_LIMIT must be positive")
+        if self.MEMORY_RRF_K <= 0:
+            raise ValueError("MEMORY_RRF_K must be positive")
+        if self.MEMORY_INDEX_BATCH_SIZE <= 0:
+            raise ValueError("MEMORY_INDEX_BATCH_SIZE must be positive")
+        if self.MEMORY_INDEX_MAX_ATTEMPTS <= 0:
+            raise ValueError("MEMORY_INDEX_MAX_ATTEMPTS must be positive")
+        if self.MEMORY_INDEX_RETRY_BASE_SECONDS <= 0:
+            raise ValueError("MEMORY_INDEX_RETRY_BASE_SECONDS must be positive")
         return self
 
 

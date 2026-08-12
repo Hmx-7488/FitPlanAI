@@ -23,6 +23,7 @@ from app.models.user import (
     ChatMessage,
     UserMemory,
     UserMemoryAudit,
+    UserMemoryIndexOutbox,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,35 @@ class MemoryConflictError(RuntimeError):
 
 MemoryType = Literal["preference", "goal", "habit", "constraint", "experience"]
 Sensitivity = Literal["normal", "health_sensitive"]
+
+
+def active_memory_filters(user_id: int, now: datetime | None = None) -> tuple[Any, ...]:
+    """Single SQLite authority predicate shared by every retrieval channel."""
+    effective_now = now or datetime.utcnow()
+    return (
+        UserMemory.user_id == user_id,
+        UserMemory.confirmation_status == "confirmed",
+        UserMemory.deleted_at.is_(None),
+        UserMemory.valid_from <= effective_now,
+        or_(UserMemory.valid_until.is_(None), UserMemory.valid_until > effective_now),
+    )
+
+
+def _queue_index_event(
+    db: AsyncSession,
+    memory: UserMemory,
+    operation: Literal["upsert", "delete"],
+) -> None:
+    """Advance the memory version and enqueue index work in the same transaction."""
+    memory.index_revision = int(memory.index_revision or 0) + 1
+    db.add(
+        UserMemoryIndexOutbox(
+            memory_id=memory.id,
+            user_id=memory.user_id,
+            operation=operation,
+            index_revision=memory.index_revision,
+        )
+    )
 
 _HEALTH_SENSITIVE_TERMS = (
     "过敏",
@@ -291,12 +321,50 @@ async def _active_same_key(
     return list((await db.execute(stmt)).scalars().all())
 
 
+async def _release_expired_slots(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    memory_key: str,
+) -> None:
+    """Release unique slots after time-based expiry and invalidate old vectors."""
+    now = datetime.utcnow()
+    expired = list(
+        (
+            await db.execute(
+                select(UserMemory).where(
+                    UserMemory.user_id == user_id,
+                    UserMemory.memory_key == memory_key,
+                    UserMemory.deleted_at.is_(None),
+                    UserMemory.active_slot.is_not(None),
+                    UserMemory.valid_until.is_not(None),
+                    UserMemory.valid_until <= now,
+                )
+            )
+        ).scalars()
+    )
+    for item in expired:
+        before = _memory_snapshot(item)
+        item.active_slot = None
+        item.updated_at = now
+        if item.confirmation_status == "confirmed":
+            _queue_index_event(db, item, "delete")
+        _audit(db, item, "expired", before=before, actor="system")
+    if expired:
+        await db.flush()
+
+
 async def _supersede_prior_memories(
     db: AsyncSession,
     memory: UserMemory,
     *,
     actor: str,
 ) -> None:
+    await _release_expired_slots(
+        db,
+        user_id=memory.user_id,
+        memory_key=memory.memory_key,
+    )
     prior = await _active_same_key(
         db,
         user_id=memory.user_id,
@@ -309,6 +377,7 @@ async def _supersede_prior_memories(
         before = _memory_snapshot(item)
         item.valid_until = now
         item.active_slot = None
+        _queue_index_event(db, item, "delete")
         _audit(db, item, "superseded", before=before, actor=actor)
     await db.flush()
     memory.active_slot = "active"
@@ -352,6 +421,11 @@ async def persist_memory_candidates(
             continue
         fingerprint = _fingerprint(candidate)
         now = datetime.utcnow()
+        await _release_expired_slots(
+            db,
+            user_id=user_id,
+            memory_key=candidate.memory_key,
+        )
         duplicate = (
             await db.execute(
                 select(UserMemory).where(
@@ -412,6 +486,8 @@ async def persist_memory_candidates(
                 extra={"user_id": user_id, "source_message_id": source_message_id},
             )
             continue
+        if memory.confirmation_status == "confirmed":
+            _queue_index_event(db, memory, "upsert")
         _audit(db, memory, "created", actor="model")
         try:
             await db.commit()
@@ -487,8 +563,10 @@ async def confirm_user_memory(
     memory.updated_at = datetime.utcnow()
     if memory.valid_until is None or memory.valid_until > datetime.utcnow():
         await _supersede_prior_memories(db, memory, actor="user")
+        _queue_index_event(db, memory, "upsert")
     else:
         memory.active_slot = None
+        _queue_index_event(db, memory, "delete")
     _audit(db, memory, "confirmed", before=before, actor="user")
     try:
         await db.commit()
@@ -511,8 +589,13 @@ async def reject_user_memory(
     memory.confirmation_status = "rejected"
     memory.active_slot = None
     memory.updated_at = datetime.utcnow()
+    _queue_index_event(db, memory, "delete")
     _audit(db, memory, "rejected", before=before, actor="user")
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise MemoryConflictError from exc
     await db.refresh(memory)
     return memory
 
@@ -568,6 +651,9 @@ async def update_user_memory(
         memory.updated_at = datetime.utcnow()
         if memory.valid_until is None or memory.valid_until > datetime.utcnow():
             await _supersede_prior_memories(db, memory, actor="user")
+            _queue_index_event(db, memory, "upsert")
+        else:
+            _queue_index_event(db, memory, "delete")
         _audit(db, memory, "updated", before=before, actor="user")
         await db.commit()
     except IntegrityError as exc:
@@ -589,8 +675,13 @@ async def delete_user_memory(
     memory.deleted_at = datetime.utcnow()
     memory.active_slot = None
     memory.updated_at = memory.deleted_at
+    _queue_index_event(db, memory, "delete")
     _audit(db, memory, "deleted", before=before, actor="user")
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise MemoryConflictError from exc
     return True
 
 
@@ -640,13 +731,7 @@ async def recall_user_memories(
     """Recall only active, confirmed memories; health constraints always rank first."""
     settings = get_settings()
     now = datetime.utcnow()
-    active_filters = (
-        UserMemory.user_id == user_id,
-        UserMemory.confirmation_status == "confirmed",
-        UserMemory.deleted_at.is_(None),
-        UserMemory.valid_from <= now,
-        or_(UserMemory.valid_until.is_(None), UserMemory.valid_until > now),
-    )
+    active_filters = active_memory_filters(user_id, now)
     health_stmt = select(UserMemory).where(
         *active_filters,
         UserMemory.sensitivity == "health_sensitive",

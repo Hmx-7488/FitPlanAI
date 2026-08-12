@@ -1,11 +1,15 @@
 import json
 import logging
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.user import User, Plan
+from app.models.user import User, Plan, UserMemoryRetrievalRun
 from app.schemas.plan import PlanGenerateRequest, PlanResponse, NeedInfoResponse, CalorieInfo, MacrosInfo
 from app.graph.workflow import run_workflow
 from app.services.supplement_service import generate_supplement_recommendations
-from app.services.user_memory_service import recall_user_memories
+from app.services.memory_retrieval_service import (
+    mark_memory_hits_included,
+    retrieve_user_memory_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,12 +51,15 @@ async def generate_plan(
 
     # Long-term memories do not mutate the authoritative profile. They are
     # supplied as a lower-priority, traceable personalization layer.
+    memory_retrieval_run_id = None
     try:
-        recalled_memories = await recall_user_memories(
+        memory_result, memory_retrieval_run_id = await retrieve_user_memory_result(
             db,
             user.id,
             "生成饮食和训练计划，结合长期目标、偏好、习惯和已确认限制",
+            consumer="plan",
         )
+        recalled_memories = memory_result.memories
     except Exception as exc:
         recalled_memories = []
         logger.warning(
@@ -69,6 +76,11 @@ async def generate_plan(
         }
         for memory in recalled_memories
     ]
+    await mark_memory_hits_included(
+        db,
+        memory_retrieval_run_id,
+        [memory.id for memory in recalled_memories],
+    )
 
     # 执行LangGraph工作流
     result = await run_workflow(user_profile)
@@ -111,6 +123,13 @@ async def generate_plan(
     db.add(plan)
     await db.commit()
     await db.refresh(plan)
+    if memory_retrieval_run_id:
+        await db.execute(
+            update(UserMemoryRetrievalRun)
+            .where(UserMemoryRetrievalRun.id == memory_retrieval_run_id)
+            .values(plan_id=plan.id)
+        )
+        await db.commit()
 
     return PlanResponse(
         id=plan.id,

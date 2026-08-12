@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,6 +21,7 @@ from app.api.exercises import router as exercises_router
 from app.api.foods import router as foods_router
 from app.services.exercise_service import import_exercises_if_empty
 from app.services.food_service import import_foods_if_empty
+from app.services.memory_index_service import run_memory_index_maintenance
 
 UPLOAD_DIR = Path(__file__).parent.parent / "data" / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -28,6 +30,16 @@ EXERCISE_MEDIA_DIR = Path(__file__).parent.parent / "data" / "exercises" / "exer
 EXERCISE_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 logger = logging.getLogger(__name__)
+
+
+async def _run_startup_memory_index_maintenance() -> None:
+    try:
+        await run_memory_index_maintenance()
+    except Exception as exc:
+        logger.warning(
+            "Memory index startup maintenance failed",
+            extra={"error_type": type(exc).__name__},
+        )
 
 
 @asynccontextmanager
@@ -50,7 +62,16 @@ async def lifespan(app: FastAPI):
         food_imported = await import_foods_if_empty(session)
         if food_imported:
             logger.info("Food database imported: %d records.", food_imported)
-    yield
+    memory_index_task = asyncio.create_task(_run_startup_memory_index_maintenance())
+    try:
+        yield
+    finally:
+        if not memory_index_task.done():
+            memory_index_task.cancel()
+        try:
+            await memory_index_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(

@@ -2,9 +2,10 @@ import json
 import logging
 import secrets
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from starlette.background import BackgroundTask
 
 from app.core.database import get_db
@@ -27,6 +28,7 @@ from app.services.chat_service import (
     stream_chat_message,
 )
 from app.services.conversation_summary_service import compact_conversation_if_needed
+from app.services.memory_index_service import run_memory_index_maintenance
 from app.services.user_memory_service import (
     MemoryConflictError,
     confirm_user_memory,
@@ -86,6 +88,11 @@ def _memory_response(memory) -> UserMemoryResponse:
     )
 
 
+def _memory_index_session_factory(db: AsyncSession):
+    """Keep response background work on the request's database binding."""
+    return async_sessionmaker(db.bind, expire_on_commit=False)
+
+
 async def postprocess_chat_conversation(
     conversation_id: int,
     postprocess_state: dict[str, int | None],
@@ -101,6 +108,7 @@ async def postprocess_chat_conversation(
                 "error_type": type(exc).__name__,
             },
         )
+
     source_message_id = postprocess_state.get("source_message_id")
     if source_message_id is None:
         return
@@ -113,6 +121,18 @@ async def postprocess_chat_conversation(
                 "conversation_id": conversation_id,
                 "source_message_id": source_message_id,
                 "task": "user_memory",
+                "error_type": type(exc).__name__,
+            },
+        )
+    try:
+        await run_memory_index_maintenance()
+    except Exception as exc:
+        logger.warning(
+            "Chat postprocess task failed",
+            extra={
+                "conversation_id": conversation_id,
+                "source_message_id": source_message_id,
+                "task": "memory_index",
                 "error_type": type(exc).__name__,
             },
         )
@@ -174,6 +194,7 @@ async def get_user_memories(
 @router.post("/memories/{memory_id}/confirm", response_model=UserMemoryResponse)
 async def confirm_memory(
     memory_id: int,
+    background_tasks: BackgroundTasks,
     payload: UserMemoryActionRequest,
     db: AsyncSession = Depends(get_db),
     _: None = Depends(require_chat_access),
@@ -187,25 +208,41 @@ async def confirm_memory(
         ) from exc
     if memory is None:
         raise HTTPException(status_code=404, detail="记忆不存在")
+    background_tasks.add_task(
+        run_memory_index_maintenance,
+        _memory_index_session_factory(db),
+    )
     return _memory_response(memory)
 
 
 @router.post("/memories/{memory_id}/reject", response_model=UserMemoryResponse)
 async def reject_memory(
     memory_id: int,
+    background_tasks: BackgroundTasks,
     payload: UserMemoryActionRequest,
     db: AsyncSession = Depends(get_db),
     _: None = Depends(require_chat_access),
 ):
-    memory = await reject_user_memory(db, memory_id, payload.user_id)
+    try:
+        memory = await reject_user_memory(db, memory_id, payload.user_id)
+    except MemoryConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="记忆已被其他请求更新，请刷新后重试",
+        ) from exc
     if memory is None:
         raise HTTPException(status_code=404, detail="记忆不存在")
+    background_tasks.add_task(
+        run_memory_index_maintenance,
+        _memory_index_session_factory(db),
+    )
     return _memory_response(memory)
 
 
 @router.patch("/memories/{memory_id}", response_model=UserMemoryResponse)
 async def edit_memory(
     memory_id: int,
+    background_tasks: BackgroundTasks,
     payload: UserMemoryUpdateRequest,
     db: AsyncSession = Depends(get_db),
     _: None = Depends(require_chat_access),
@@ -231,18 +268,34 @@ async def edit_memory(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if memory is None:
         raise HTTPException(status_code=404, detail="记忆不存在")
+    background_tasks.add_task(
+        run_memory_index_maintenance,
+        _memory_index_session_factory(db),
+    )
     return _memory_response(memory)
 
 
 @router.delete("/memories/{memory_id}")
 async def forget_memory(
     memory_id: int,
+    background_tasks: BackgroundTasks,
     user_id: int = Query(gt=0),
     db: AsyncSession = Depends(get_db),
     _: None = Depends(require_chat_access),
 ):
-    if not await delete_user_memory(db, memory_id, user_id):
+    try:
+        deleted = await delete_user_memory(db, memory_id, user_id)
+    except MemoryConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="记忆已被其他请求更新，请刷新后重试",
+        ) from exc
+    if not deleted:
         raise HTTPException(status_code=404, detail="记忆不存在")
+    background_tasks.add_task(
+        run_memory_index_maintenance,
+        _memory_index_session_factory(db),
+    )
     return {"status": "deleted"}
 
 

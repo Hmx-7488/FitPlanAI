@@ -16,7 +16,10 @@ from app.models.user import ChatConversation, ChatMessage, Plan, User
 from app.services.artifact_microcompact import MicrocompactPolicy
 from app.services.context_builder import ContextBudget, build_chat_context
 from app.services.conversation_summary_service import get_latest_completed_summary
-from app.services.user_memory_service import recall_user_memories
+from app.services.memory_retrieval_service import (
+    mark_memory_hits_included,
+    retrieve_user_memory_result,
+)
 
 _CHAT_GRAPH = build_chat_graph()
 logger = logging.getLogger(__name__)
@@ -228,8 +231,18 @@ async def stream_chat_message(
     profile, latest_plan, history = await _load_agent_context(
         db, conversation, current_page, page_context or {}
     )
+    memory_recall_result = None
+    memory_retrieval_run_id = None
     try:
-        long_term_memories = await recall_user_memories(db, user_id, content)
+        memory_recall_result, memory_retrieval_run_id = await retrieve_user_memory_result(
+            db,
+            user_id,
+            content,
+            consumer="chat",
+            conversation_id=conversation.id,
+            source_message_id=user_message.id,
+        )
+        long_term_memories = memory_recall_result.memories
     except Exception as exc:
         long_term_memories = []
         logger.warning(
@@ -300,8 +313,24 @@ async def stream_chat_message(
             "memory_ids": built_context.diagnostics.get(
                 "long_term_memory_ids", []
             ),
+            "memory_retrieval_run_id": memory_retrieval_run_id,
+            "memory_retrieval_mode": (
+                memory_recall_result.effective_mode
+                if memory_recall_result is not None
+                else None
+            ),
+            "memory_retrieval_degraded": (
+                memory_recall_result.degraded
+                if memory_recall_result is not None
+                else False
+            ),
             "context_budget": built_context.diagnostics,
         }
+        await mark_memory_hits_included(
+            db,
+            memory_retrieval_run_id,
+            built_context.diagnostics.get("long_term_memory_ids", []),
+        )
         yield {
             "event": "meta",
             "data": context_summary,

@@ -743,6 +743,11 @@ class UserMemoryExtractionTests(unittest.IsolatedAsyncioTestCase):
 
 class UserMemoryApiTests(unittest.TestCase):
     def setUp(self):
+        self.memory_index_patcher = patch(
+            "app.api.chat.run_memory_index_maintenance",
+            new=AsyncMock(return_value={}),
+        )
+        self.memory_index_patcher.start()
         self.temp_dir = tempfile.TemporaryDirectory()
         db_path = Path(self.temp_dir.name) / "memory-api.db"
         self.engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
@@ -785,6 +790,7 @@ class UserMemoryApiTests(unittest.TestCase):
 
     def tearDown(self):
         self.client.close()
+        self.memory_index_patcher.stop()
         app.dependency_overrides.clear()
         import asyncio
 
@@ -845,6 +851,25 @@ class UserMemoryApiTests(unittest.TestCase):
                 "/api/chat/memories/1",
                 json={"user_id": 1, "content_text": "用户膝盖已恢复"},
             )
+        self.assertEqual(response.status_code, 409)
+
+    def test_concurrent_reject_returns_conflict_instead_of_server_error(self):
+        with patch(
+            "app.api.chat.reject_user_memory",
+            new=AsyncMock(side_effect=MemoryConflictError()),
+        ):
+            response = self.client.post(
+                "/api/chat/memories/1/reject",
+                json={"user_id": 1},
+            )
+        self.assertEqual(response.status_code, 409)
+
+    def test_concurrent_delete_returns_conflict_instead_of_server_error(self):
+        with patch(
+            "app.api.chat.delete_user_memory",
+            new=AsyncMock(side_effect=MemoryConflictError()),
+        ):
+            response = self.client.delete("/api/chat/memories/1?user_id=1")
         self.assertEqual(response.status_code, 409)
 
     def test_empty_edit_cannot_confirm_sensitive_candidate(self):
@@ -947,6 +972,7 @@ class UserMemoryMigrationTests(unittest.TestCase):
             engine.dispose()
 
         self.assertIn("active_slot", columns)
+        self.assertIn("index_revision", columns)
         self.assertIn("uq_user_memory_active_slot", indexes)
         self.assertEqual(active, [(2,)])
 
