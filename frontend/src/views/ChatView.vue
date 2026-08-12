@@ -3,11 +3,15 @@ import { computed, nextTick, onMounted, ref } from 'vue'
 import {
   Archive,
   BookOpen,
+  BrainCircuit,
+  Check,
   Menu,
   MessageSquare,
   Plus,
   Send,
+  ShieldAlert,
   Square,
+  Trash2,
   X,
 } from '@lucide/vue'
 import {
@@ -15,12 +19,18 @@ import {
   createChatConversation,
   getChatConversation,
   getChatConversations,
+  getUserMemories,
+  confirmUserMemory,
+  rejectUserMemory,
+  deleteUserMemory,
   streamChatMessage,
 } from '../api'
 import type {
   ChatCitation,
   ChatConversation,
   ChatMessage,
+  UserMemory,
+  UserMemoryType,
 } from '../types'
 import { sanitizeHtml } from '../utils/sanitize'
 
@@ -33,12 +43,31 @@ const loading = ref(true)
 const generating = ref(false)
 const errorMessage = ref('')
 const sidebarOpen = ref(false)
+const memoryPanelOpen = ref(false)
+const memories = ref<UserMemory[]>([])
+const memoriesLoading = ref(false)
+const memoryActionId = ref<number | null>(null)
+const memoryError = ref('')
 const messageList = ref<HTMLElement | null>(null)
 let abortController: AbortController | null = null
 
 const activeConversation = computed(() =>
   conversations.value.find(item => item.id === activeConversationId.value)
 )
+const pendingMemories = computed(() =>
+  memories.value.filter(item => item.confirmation_status === 'candidate')
+)
+const confirmedMemories = computed(() =>
+  memories.value.filter(item => item.confirmation_status === 'confirmed')
+)
+
+const memoryTypeLabels: Record<UserMemoryType, string> = {
+  preference: '偏好',
+  goal: '目标',
+  habit: '习惯',
+  constraint: '限制',
+  experience: '经历',
+}
 
 const quickPrompts = [
   '根据我的目标，解释一下每天的热量和蛋白质安排',
@@ -72,7 +101,13 @@ async function loadConversations() {
     return
   }
   try {
-    conversations.value = await getChatConversations(userId)
+    const [conversationResults, memoryResults] = await Promise.allSettled([
+      getChatConversations(userId),
+      getUserMemories(userId),
+    ])
+    if (conversationResults.status === 'rejected') throw conversationResults.reason
+    conversations.value = conversationResults.value
+    if (memoryResults.status === 'fulfilled') memories.value = memoryResults.value
     if (conversations.value.length) {
       await openConversation(conversations.value[0].id)
     }
@@ -80,6 +115,59 @@ async function loadConversations() {
     errorMessage.value = '会话列表加载失败'
   } finally {
     loading.value = false
+  }
+}
+
+async function openMemoryPanel() {
+  if (!userId) return
+  memoryPanelOpen.value = true
+  memoriesLoading.value = true
+  memoryError.value = ''
+  try {
+    memories.value = await getUserMemories(userId)
+  } catch {
+    memoryError.value = '记忆列表加载失败，请稍后重试。'
+  } finally {
+    memoriesLoading.value = false
+  }
+}
+
+async function confirmMemory(memory: UserMemory) {
+  memoryActionId.value = memory.id
+  memoryError.value = ''
+  try {
+    const updated = await confirmUserMemory(memory.id, userId)
+    memories.value = memories.value.map(item => item.id === memory.id ? updated : item)
+  } catch {
+    memoryError.value = '确认失败，请稍后重试。'
+  } finally {
+    memoryActionId.value = null
+  }
+}
+
+async function rejectMemory(memory: UserMemory) {
+  memoryActionId.value = memory.id
+  memoryError.value = ''
+  try {
+    await rejectUserMemory(memory.id, userId)
+    memories.value = memories.value.filter(item => item.id !== memory.id)
+  } catch {
+    memoryError.value = '忽略失败，请稍后重试。'
+  } finally {
+    memoryActionId.value = null
+  }
+}
+
+async function forgetMemory(memory: UserMemory) {
+  memoryActionId.value = memory.id
+  memoryError.value = ''
+  try {
+    await deleteUserMemory(memory.id, userId)
+    memories.value = memories.value.filter(item => item.id !== memory.id)
+  } catch {
+    memoryError.value = '遗忘失败，请稍后重试。'
+  } finally {
+    memoryActionId.value = null
   }
 }
 
@@ -222,10 +310,102 @@ onMounted(loadConversations)
         <h1>AI 健康助手</h1>
         <p>{{ activeConversation?.title || '新对话' }}</p>
       </div>
+      <button class="memory-button" :disabled="!userId" @click="openMemoryPanel">
+        <BrainCircuit :size="17" />
+        <span>记忆</span>
+        <small v-if="pendingMemories.length">{{ pendingMemories.length }}</small>
+      </button>
       <button class="new-chat-button" :disabled="!userId || generating" @click="newConversation">
         <Plus :size="17" />
         新对话
       </button>
+    </div>
+
+    <div
+      v-if="memoryPanelOpen"
+      class="memory-overlay"
+      role="presentation"
+      @click.self="memoryPanelOpen = false"
+    >
+      <section class="memory-panel" role="dialog" aria-modal="true" aria-labelledby="memory-title">
+        <header class="memory-panel__header">
+          <div class="memory-title-mark"><BrainCircuit :size="20" /></div>
+          <div>
+            <p class="memory-kicker">PERSONAL CONTEXT</p>
+            <h2 id="memory-title">Agent 记住的内容</h2>
+          </div>
+          <button class="icon-button" title="关闭记忆面板" @click="memoryPanelOpen = false">
+            <X :size="20" />
+          </button>
+        </header>
+
+        <p class="memory-intro">
+          高置信普通偏好可用于后续对话；低置信信息以及伤病、过敏等健康内容必须由你确认后才会生效。
+        </p>
+        <p v-if="memoryError" class="memory-error">{{ memoryError }}</p>
+        <div v-if="memoriesLoading" class="memory-empty">正在读取记忆…</div>
+
+        <div v-else class="memory-scroll">
+          <section v-if="pendingMemories.length" class="memory-group memory-group--pending">
+            <div class="memory-group__heading">
+              <span><ShieldAlert :size="16" /> 待你确认</span>
+              <small>{{ pendingMemories.length }} 条信息确认后才生效</small>
+            </div>
+            <article v-for="memory in pendingMemories" :key="memory.id" class="memory-card">
+              <div class="memory-card__meta">
+                <span>{{ memoryTypeLabels[memory.memory_type] }}</span>
+                <code>#{{ memory.id }}</code>
+              </div>
+              <p>{{ memory.content_text }}</p>
+              <div class="memory-card__actions">
+                <button
+                  class="memory-action memory-action--confirm"
+                  :disabled="memoryActionId === memory.id"
+                  @click="confirmMemory(memory)"
+                >
+                  <Check :size="15" /> 确认记住
+                </button>
+                <button
+                  class="memory-action"
+                  :disabled="memoryActionId === memory.id"
+                  @click="rejectMemory(memory)"
+                >
+                  忽略
+                </button>
+              </div>
+            </article>
+          </section>
+
+          <section v-if="confirmedMemories.length" class="memory-group">
+            <div class="memory-group__heading">
+              <span><Check :size="16" /> 已确认记忆</span>
+              <small>{{ confirmedMemories.length }} 条正在参与个性化</small>
+            </div>
+            <article v-for="memory in confirmedMemories" :key="memory.id" class="memory-card">
+              <div class="memory-card__meta">
+                <span>{{ memoryTypeLabels[memory.memory_type] }}</span>
+                <span v-if="memory.sensitivity === 'health_sensitive'" class="sensitive-tag">健康信息</span>
+                <code>#{{ memory.id }}</code>
+              </div>
+              <p>{{ memory.content_text }}</p>
+              <button
+                class="forget-action"
+                :disabled="memoryActionId === memory.id"
+                title="让 Agent 遗忘这条内容"
+                @click="forgetMemory(memory)"
+              >
+                <Trash2 :size="15" /> 遗忘
+              </button>
+            </article>
+          </section>
+
+          <div v-if="!pendingMemories.length && !confirmedMemories.length" class="memory-empty">
+            <BrainCircuit :size="28" />
+            <strong>还没有长期记忆</strong>
+            <span>当你明确表达稳定偏好或长期目标后，它们会出现在这里。</span>
+          </div>
+        </div>
+      </section>
     </div>
 
     <div v-if="!userId" class="profile-required">
@@ -386,6 +566,254 @@ onMounted(loadConversations)
   color: white;
   font-weight: 600;
   cursor: pointer;
+}
+
+.memory-button {
+  position: relative;
+  margin-left: auto;
+  height: 38px;
+  padding: 0 var(--space-3);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.memory-button:hover {
+  border-color: var(--color-accent);
+  color: var(--color-text-primary);
+}
+
+.memory-button small {
+  min-width: 19px;
+  height: 19px;
+  padding: 0 5px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--color-danger);
+  color: white;
+  font-size: 11px;
+}
+
+.new-chat-button {
+  margin-left: 0;
+}
+
+.memory-overlay {
+  position: fixed;
+  z-index: 320;
+  inset: 0;
+  display: grid;
+  justify-items: end;
+  background: rgb(20 28 24 / 0.3);
+  backdrop-filter: blur(4px);
+}
+
+.memory-panel {
+  width: min(92vw, 480px);
+  height: 100%;
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  background:
+    radial-gradient(circle at 92% 4%, color-mix(in srgb, var(--color-accent) 10%, transparent), transparent 28%),
+    var(--color-surface);
+  border-left: 1px solid var(--color-border);
+  box-shadow: -24px 0 70px rgb(23 37 30 / 0.12);
+  animation: memory-panel-in 220ms var(--ease-out);
+}
+
+@keyframes memory-panel-in {
+  from { opacity: 0; transform: translateX(28px); }
+}
+
+.memory-panel__header {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 36px;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.memory-title-mark {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 14px;
+  background: var(--color-accent-subtle);
+  color: var(--color-accent);
+}
+
+.memory-kicker {
+  color: var(--color-accent);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.15em;
+}
+
+.memory-panel__header h2 {
+  font-size: var(--text-lg);
+}
+
+.memory-intro {
+  margin: var(--space-5) 0;
+  padding: var(--space-3) var(--space-4);
+  border-left: 3px solid var(--color-accent);
+  background: var(--color-accent-subtle);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+}
+
+.memory-error {
+  margin-bottom: var(--space-3);
+  color: var(--color-danger);
+  font-size: var(--text-sm);
+}
+
+.memory-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 3px;
+}
+
+.memory-group + .memory-group {
+  margin-top: var(--space-6);
+}
+
+.memory-group__heading {
+  margin-bottom: var(--space-3);
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.memory-group__heading span {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: 750;
+}
+
+.memory-group__heading small {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.memory-group--pending .memory-group__heading span {
+  color: var(--color-danger);
+}
+
+.memory-card {
+  position: relative;
+  margin-bottom: var(--space-2);
+  padding: var(--space-4);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+}
+
+.memory-group--pending .memory-card {
+  border-color: color-mix(in srgb, var(--color-danger) 22%, var(--color-border));
+}
+
+.memory-card__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.memory-card__meta span:first-child {
+  color: var(--color-accent);
+  font-weight: 750;
+}
+
+.memory-card__meta code {
+  margin-left: auto;
+  font-size: 10px;
+}
+
+.sensitive-tag {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+  color: var(--color-danger) !important;
+}
+
+.memory-card > p {
+  margin-top: var(--space-2);
+  color: var(--color-text-primary);
+  line-height: var(--leading-relaxed);
+}
+
+.memory-card__actions {
+  margin-top: var(--space-3);
+  display: flex;
+  gap: var(--space-2);
+}
+
+.memory-action,
+.forget-action {
+  height: 32px;
+  padding: 0 var(--space-3);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.memory-action--confirm {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: white;
+}
+
+.forget-action {
+  margin-top: var(--space-3);
+  padding-left: 0;
+  border: 0;
+  color: var(--color-text-tertiary);
+}
+
+.forget-action:hover {
+  color: var(--color-danger);
+}
+
+.memory-action:disabled,
+.forget-action:disabled {
+  opacity: 0.45;
+  cursor: wait;
+}
+
+.memory-empty {
+  min-height: 180px;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-tertiary);
+  text-align: center;
+  font-size: var(--text-sm);
+}
+
+.memory-empty strong {
+  color: var(--color-text-primary);
 }
 
 .new-chat-button:disabled,
@@ -734,6 +1162,26 @@ onMounted(loadConversations)
     padding: 0;
     justify-content: center;
     font-size: 0;
+  }
+
+  .memory-button span {
+    display: none;
+  }
+
+  .memory-button {
+    width: 38px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .memory-button small {
+    position: absolute;
+    margin: -28px 0 0 28px;
+  }
+
+  .memory-panel {
+    width: 100%;
+    padding: var(--space-5) var(--space-4);
   }
 
   .chat-layout {

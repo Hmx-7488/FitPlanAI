@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, Integer, Float, DateTime, Text, JSON
+from sqlalchemy import String, Integer, Float, DateTime, Text, JSON, Index, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from app.core.database import Base
 
@@ -232,4 +232,93 @@ class ChatMessage(Base):
     citations_json: Mapped[str] = mapped_column(Text, default="[]")
     context_json: Mapped[str] = mapped_column(Text, default="{}")
     status: Mapped[str] = mapped_column(String(20), default="completed")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ChatConversationSummary(Base):
+    """Versioned, cursor-based summary for one chat conversation."""
+    __tablename__ = "chat_conversation_summaries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[int] = mapped_column(Integer, index=True)
+    summary_json: Mapped[str] = mapped_column(Text, default="{}")
+    summary_text: Mapped[str] = mapped_column(Text, default="")
+    covered_through_message_id: Mapped[int] = mapped_column(Integer, index=True)
+    source_message_count: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    model: Mapped[str] = mapped_column(String(100), default="")
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    error_type: Mapped[str] = mapped_column(String(100), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class UserMemory(Base):
+    """Governed cross-conversation memory derived from explicit user messages."""
+    __tablename__ = "user_memories"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "source_message_id",
+            "content_fingerprint",
+            name="uq_user_memory_source_fingerprint",
+        ),
+        Index(
+            "uq_user_memory_active_slot",
+            "user_id",
+            "memory_key",
+            "active_slot",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    memory_type: Mapped[str] = mapped_column(String(30), index=True)
+    memory_key: Mapped[str] = mapped_column(String(160), index=True)
+    content_json: Mapped[str] = mapped_column(Text, default="{}")
+    content_text: Mapped[str] = mapped_column(Text)
+    content_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    source_conversation_id: Mapped[int] = mapped_column(
+        Integer, nullable=True, index=True
+    )
+    source_message_id: Mapped[int] = mapped_column(
+        Integer, nullable=True, index=True
+    )
+    confirmation_status: Mapped[str] = mapped_column(
+        String(20), default="candidate", index=True
+    )
+    sensitivity: Mapped[str] = mapped_column(
+        String(30), default="normal", index=True
+    )
+    confidence: Mapped[float] = mapped_column(Float, default=0)
+    # "active" for the one current confirmed value; candidates use a
+    # fingerprint-scoped slot. NULL means rejected, expired, superseded, deleted.
+    active_slot: Mapped[str] = mapped_column(String(80), nullable=True)
+    valid_from: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    valid_until: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    supersedes_memory_id: Mapped[int] = mapped_column(Integer, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(20), default="model")
+    deleted_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class UserMemoryAudit(Base):
+    """Content-safe change history for a governed user memory."""
+    __tablename__ = "user_memory_audits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    memory_id: Mapped[int] = mapped_column(Integer, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    action: Mapped[str] = mapped_column(String(30), index=True)
+    before_json: Mapped[str] = mapped_column(Text, default="{}")
+    after_json: Mapped[str] = mapped_column(Text, default="{}")
+    actor: Mapped[str] = mapped_column(String(20), default="system")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

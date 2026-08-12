@@ -1,0 +1,116 @@
+[
+  {
+    "id": "diet_only_recall",
+    "query": "帮我安排今天的饮食",
+    "limit": 5,
+    "expected_ids": [1],
+    "memories": [
+      {
+        "id": 1,
+        "memory_type": "preference",
+        "memory_key": "diet.disliked_food.cilantro",
+        "content_text": "用户不喜欢香菜",
+        "confirmation_status": "confirmed",
+        "sensitivity": "normal"
+      },
+      {
+        "id": 2,
+        "memory_type": "habit",
+        "memory_key": "training.preferred_time.morning",
+        "content_text": "用户习惯早晨训练",
+        "confirmation_status": "confirmed",
+        "sensitivity": "normal"
+      }
+    ]
+  },
+  {
+    "id": "training_health_first",
+    "query": "这周训练怎么安排",
+    "limit": 5,
+    "expected_ids": [11, 10],
+    "memories": [
+      {
+        "id": 10,
+        "memory_type": "habit",
+        "memory_key": "training.preferred_time.morning",
+        "content_text": "用户习惯早晨训练",
+        "confirmation_status": "confirmed",
+        "sensitivity": "normal"
+      },
+      {
+        "id": 11,
+        "memory_type": "constraint",
+        "memory_key": "training.injury.knee",
+        "content_text": "用户已确认膝盖疼痛，避免高冲击训练",
+        "confirmation_status": "confirmed",
+        "sensitivity": "health_sensitive"
+      },
+      {
+        "id": 12,
+        "memory_type": "constraint",
+        "memory_key": "training.injury.shoulder",
+        "content_text": "用户提到肩部疼痛",
+        "confirmation_status": "candidate",
+        "sensitivity": "health_sensitive"
+      }
+    ]
+  },
+  {
+    "id": "unrelated_query_returns_none",
+    "query": "你好，今天心情不错",
+    "limit": 5,
+    "expected_ids": [],
+    "memories": [
+      {
+        "id": 20,
+        "memory_type": "preference",
+        "memory_key": "diet.disliked_food.cilantro",
+        "content_text": "用户不喜欢香菜",
+        "confirmation_status": "confirmed",
+        "sensitivity": "normal"
+      }
+    ]
+  },
+  {
+    "id": "expired_deleted_rejected_excluded",
+    "query": "回顾我的减脂目标和计划进度",
+    "limit": 5,
+    "expected_ids": [30],
+    "memories": [
+      {
+        "id": 30,
+        "memory_type": "goal",
+        "memory_key": "goal.target_weight.current",
+        "content_text": "用户当前目标体重为70公斤",
+        "confirmation_status": "confirmed",
+        "sensitivity": "normal"
+      },
+      {
+        "id": 31,
+        "memory_type": "goal",
+        "memory_key": "goal.target_weight.old",
+        "content_text": "用户旧目标体重为65公斤",
+        "confirmation_status": "confirmed",
+        "sensitivity": "normal",
+        "valid_until": "2020-01-01T00:00:00"
+      },
+      {
+        "id": 32,
+        "memory_type": "goal",
+        "memory_key": "goal.deleted",
+        "content_text": "用户已删除的目标",
+        "confirmation_status": "confirmed",
+        "sensitivity": "normal",
+        "deleted_at": "2026-01-01T00:00:00"
+      },
+      {
+        "id": 33,
+        "memory_type": "goal",
+        "memory_key": "goal.rejected",
+        "content_text": "用户拒绝的目标",
+        "confirmation_status": "rejected",
+        "sensitivity": "normal"
+      }
+    ]
+  }
+]

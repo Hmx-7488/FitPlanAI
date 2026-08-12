@@ -527,3 +527,26 @@ export interface ChatConversation {
 export interface ChatConversationDetail extends ChatConversation {
   messages: ChatMessage[]
 }
+
+export type UserMemoryType = 'preference' | 'goal' | 'habit' | 'constraint' | 'experience'
+export type UserMemoryStatus = 'candidate' | 'confirmed' | 'rejected'
+
+export interface UserMemory {
+  id: number
+  user_id: number
+  memory_type: UserMemoryType
+  memory_key: string
+  content: Record<string, unknown>
+  content_text: string
+  source_conversation_id: number | null
+  source_message_id: number | null
+  confirmation_status: UserMemoryStatus
+  sensitivity: 'normal' | 'health_sensitive'
+  confidence: number
+  valid_from: string
+  valid_until: string | null
+  supersedes_memory_id: number | null
+  created_by: string
+  created_at: string
+  updated_at: string
+}

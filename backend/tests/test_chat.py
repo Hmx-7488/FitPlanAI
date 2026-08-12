@@ -115,6 +115,50 @@ class ChatApiTests(unittest.TestCase):
         )
         self.assertEqual(stream.status_code, 404)
 
+    def test_stream_completion_runs_summary_background_check(self):
+        created = self.client.post(
+            "/api/chat/conversations",
+            json={"user_id": 1},
+        ).json()
+        conversation_id = created["id"]
+        compacted = []
+
+        async def fake_stream_chat_message(**_kwargs):
+            yield {
+                "event": "done",
+                "data": {"id": 1},
+                "internal": {"source_message_id": 77},
+            }
+
+        async def fake_compact(target_conversation_id):
+            compacted.append(target_conversation_id)
+
+        extracted = []
+
+        async def fake_extract(target_conversation_id, source_message_id):
+            extracted.append((target_conversation_id, source_message_id))
+            return 0
+
+        with patch(
+            "app.api.chat.stream_chat_message",
+            new=fake_stream_chat_message,
+        ), patch(
+            "app.api.chat.compact_conversation_if_needed",
+            new=fake_compact,
+        ), patch(
+            "app.api.chat.extract_and_persist_user_memory",
+            new=fake_extract,
+        ):
+            response = self.client.post(
+                f"/api/chat/conversations/{conversation_id}/messages/stream",
+                json={"user_id": 1, "content": "测试后台摘要"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("event: done", response.text)
+        self.assertEqual(compacted, [conversation_id])
+        self.assertEqual(extracted, [(conversation_id, 77)])
+
 
 class _FakeStreamingLlm:
     def __init__(self, chunks=None, error: Exception | None = None):
@@ -161,6 +205,7 @@ class ChatStreamingTests(unittest.IsolatedAsyncioTestCase):
             "risk_level": "normal",
             "risk_notice": "",
             "retrieved_knowledge": [{
+                "chunk_id": "chunk-1",
                 "title": "蛋白质建议",
                 "content": "按体重安排蛋白质。",
                 "category": "fat_loss_standards",
@@ -211,6 +256,15 @@ class ChatStreamingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(message.content, "你好世界")
             self.assertEqual(message.status, "completed")
             self.assertIn("chunk-1", message.citations_json)
+            meta = events[0]["data"]
+            self.assertIn("context_budget", meta)
+            self.assertTrue(meta["context_budget"]["within_budget"])
+            self.assertEqual(meta["context_budget"]["knowledge_included"], 1)
+            self.assertEqual(meta["context_budget"]["artifact_full"], 1)
+            self.assertEqual(
+                meta["context_budget"]["artifacts"][0]["reference_id"],
+                "chunk-1",
+            )
 
     async def test_model_failure_persists_failed_status(self):
         async with self.session_factory() as session:

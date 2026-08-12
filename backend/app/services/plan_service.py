@@ -1,9 +1,13 @@
 import json
+import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.user import User, Plan
 from app.schemas.plan import PlanGenerateRequest, PlanResponse, NeedInfoResponse, CalorieInfo, MacrosInfo
 from app.graph.workflow import run_workflow
 from app.services.supplement_service import generate_supplement_recommendations
+from app.services.user_memory_service import recall_user_memories
+
+logger = logging.getLogger(__name__)
 
 
 async def generate_plan(
@@ -40,6 +44,31 @@ async def generate_plan(
         "meal_scenario": user.meal_scenario,
         "prep_time_limit_minutes": user.prep_time_limit_minutes,
     }
+
+    # Long-term memories do not mutate the authoritative profile. They are
+    # supplied as a lower-priority, traceable personalization layer.
+    try:
+        recalled_memories = await recall_user_memories(
+            db,
+            user.id,
+            "生成饮食和训练计划，结合长期目标、偏好、习惯和已确认限制",
+        )
+    except Exception as exc:
+        recalled_memories = []
+        logger.warning(
+            "Plan memory recall failed; continuing without memories",
+            extra={"user_id": user.id, "error_type": type(exc).__name__},
+        )
+    user_profile["confirmed_memories"] = [
+        {
+            "id": memory.id,
+            "memory_type": memory.memory_type,
+            "memory_key": memory.memory_key,
+            "content_text": memory.content_text,
+            "sensitivity": memory.sensitivity,
+        }
+        for memory in recalled_memories
+    ]
 
     # 执行LangGraph工作流
     result = await run_workflow(user_profile)

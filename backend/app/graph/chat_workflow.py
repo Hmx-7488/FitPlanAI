@@ -18,6 +18,7 @@ class ChatAgentState(TypedDict):
     risk_notice: str
     retrieved_knowledge: list[dict[str, Any]]
     citations: list[dict[str, Any]]
+    long_term_memories: list[Any]
 
 
 _HIGH_RISK_TERMS = {
@@ -61,6 +62,7 @@ def retrieve_chat_knowledge(state: ChatAgentState) -> dict:
     result = get_retriever().search(query)
     documents = [
         {
+            "chunk_id": item.chunk_id,
             "title": item.title,
             "content": item.content,
             "category": item.category,

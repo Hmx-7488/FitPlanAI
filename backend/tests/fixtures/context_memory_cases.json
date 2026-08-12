@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "description": "SlimAgent M0 deterministic context-availability evaluation cases",
+  "cases": [
+    {
+      "id": "recent_preference_visible",
+      "category": "same_session_recent",
+      "description": "近期明确表达的饮食偏好仍在当前消息窗口内",
+      "criticality": "normal",
+      "active_conversation_id": "current",
+      "filler_turns_before": 4,
+      "fact_messages": [
+        {
+          "conversation_id": "current",
+          "role": "user",
+          "content": "请记住，我早餐更喜欢无糖酸奶。"
+        },
+        {
+          "conversation_id": "current",
+          "role": "assistant",
+          "content": "明白，本次对话会优先考虑无糖酸奶。"
+        }
+      ],
+      "filler_turns_after": 1,
+      "probe": "按照我刚才的偏好推荐早餐。",
+      "must_include": ["无糖酸奶"],
+      "expected_current_visibility": true
+    },
+    {
+      "id": "early_goal_truncated",
+      "category": "same_session_long",
+      "description": "长对话早期提出的阶段目标被固定消息窗口截断",
+      "criticality": "normal",
+      "active_conversation_id": "current",
+      "filler_turns_before": 0,
+      "fact_messages": [
+        {
+          "conversation_id": "current",
+          "role": "user",
+          "content": "这个阶段我的核心目标是十二周减重六公斤。"
+        },
+        {
+          "conversation_id": "current",
+          "role": "assistant",
+          "content": "已了解你的十二周阶段目标。"
+        }
+      ],
+      "filler_turns_after": 6,
+      "probe": "回顾一下我这个阶段的核心目标。",
+      "must_include": ["十二周减重六公斤"],
+      "expected_current_visibility": false
+    },
+    {
+      "id": "profile_allergy_authoritative",
+      "category": "authoritative_profile",
+      "description": "正式用户档案中的过敏信息不依赖聊天历史窗口",
+      "criticality": "safety",
+      "active_conversation_id": "current",
+      "profile_context": {
+        "allergies": ["花生严重过敏"]
+      },
+      "filler_turns_before": 6,
+      "fact_messages": [],
+      "filler_turns_after": 0,
+      "probe": "给我推荐一个加餐。",
+      "must_include": ["花生严重过敏"],
+      "expected_current_visibility": true
+    },
+    {
+      "id": "chat_only_injury_truncated",
+      "category": "unconfirmed_sensitive_fact",
+      "description": "仅在长对话早期提到、尚未写入档案的伤病会被截断",
+      "criticality": "safety",
+      "active_conversation_id": "current",
+      "profile_context": {
+        "injuries": []
+      },
+      "filler_turns_before": 0,
+      "fact_messages": [
+        {
+          "conversation_id": "current",
+          "role": "user",
+          "content": "我最近右膝半月板受伤，深蹲时会疼。"
+        },
+        {
+          "conversation_id": "current",
+          "role": "assistant",
+          "content": "涉及疼痛和伤病，需要谨慎调整训练。"
+        }
+      ],
+      "filler_turns_after": 6,
+      "probe": "今天应该安排什么腿部训练？",
+      "must_include": ["右膝半月板受伤"],
+      "expected_current_visibility": false
+    },
+    {
+      "id": "cross_session_preference_unavailable",
+      "category": "cross_session",
+      "description": "旧会话中的稳定偏好不会被当前会话自动召回",
+      "criticality": "normal",
+      "active_conversation_id": "current",
+      "filler_turns_before": 3,
+      "fact_messages": [
+        {
+          "conversation_id": "archived",
+          "role": "user",
+          "content": "以后给我安排食谱时，我不吃香菜。"
+        },
+        {
+          "conversation_id": "archived",
+          "role": "assistant",
+          "content": "知道了，你不吃香菜。"
+        }
+      ],
+      "filler_turns_after": 2,
+      "probe": "结合我以前说过的偏好安排今天晚餐。",
+      "must_include": ["不吃香菜"],
+      "expected_current_visibility": false
+    },
+    {
+      "id": "recent_override_visible",
+      "category": "conflict_recency",
+      "description": "近期目标变更仍可覆盖长对话早期的旧目标",
+      "criticality": "normal",
+      "active_conversation_id": "current",
+      "filler_turns_before": 5,
+      "fact_messages": [
+        {
+          "conversation_id": "current",
+          "role": "user",
+          "content": "计划有变化，请把每周五练改成每周三练。"
+        },
+        {
+          "conversation_id": "current",
+          "role": "assistant",
+          "content": "收到，当前以每周三练为准。"
+        }
+      ],
+      "filler_turns_after": 1,
+      "probe": "我现在每周准备训练几次？",
+      "must_include": ["每周三练"],
+      "expected_current_visibility": true
+    }
+  ]
+}

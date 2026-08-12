@@ -17,6 +17,7 @@ import type {
   WorkoutAdjustRequest,
   ChatConversation,
   ChatConversationDetail,
+  UserMemory,
   BodyPhotoAnalysis,
   BodyMeasurements,
   BodyAnalysisHistoryItem,
@@ -411,6 +412,29 @@ export async function archiveChatConversation(
   userId: number
 ): Promise<void> {
   await api.delete(`/chat/conversations/${conversationId}?user_id=${userId}`)
+}
+
+export async function getUserMemories(userId: number): Promise<UserMemory[]> {
+  const res = await api.get<UserMemory[]>(`/chat/memories?user_id=${userId}`)
+  return res.data
+}
+
+export async function confirmUserMemory(memoryId: number, userId: number): Promise<UserMemory> {
+  const res = await api.post<UserMemory>(`/chat/memories/${memoryId}/confirm`, {
+    user_id: userId,
+  })
+  return res.data
+}
+
+export async function rejectUserMemory(memoryId: number, userId: number): Promise<UserMemory> {
+  const res = await api.post<UserMemory>(`/chat/memories/${memoryId}/reject`, {
+    user_id: userId,
+  })
+  return res.data
+}
+
+export async function deleteUserMemory(memoryId: number, userId: number): Promise<void> {
+  await api.delete(`/chat/memories/${memoryId}?user_id=${userId}`)
 }
 
 export interface ChatStreamCallbacks {

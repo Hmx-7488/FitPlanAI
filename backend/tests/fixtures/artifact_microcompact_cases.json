@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "full_content_tokens": 80,
+    "compact_content_tokens": 35
+  },
+  "cases": [
+    {
+      "id": "rag_health_risk",
+      "kind": "rag",
+      "title": "膝伤训练风险",
+      "reference_id": "risk-chunk-1",
+      "repeat_text": "这是用于解释训练背景的普通段落。",
+      "repeat": 80,
+      "critical_tail": "膝盖疼痛时不应继续负重深蹲，每周训练次数需要下调。",
+      "must_preserve": ["膝盖疼痛", "不应", "每周"],
+      "budget_tokens": 120,
+      "expected_mode": "microcompact"
+    },
+    {
+      "id": "tool_numeric_result",
+      "kind": "tool",
+      "title": "动作候选搜索",
+      "reference_id": "tool-call-20",
+      "repeat_text": "候选动作包含普通说明。",
+      "repeat": 70,
+      "critical_tail": "搜索候选动作共20个，因伤病排除7个，最终保留13个。",
+      "must_preserve": ["20个", "排除7个", "保留13个"],
+      "budget_tokens": 120,
+      "expected_mode": "microcompact"
+    },
+    {
+      "id": "short_rag_full",
+      "kind": "rag",
+      "title": "蛋白质建议",
+      "reference_id": "protein-chunk-1",
+      "repeat_text": "减脂期应根据体重安排蛋白质。",
+      "repeat": 1,
+      "critical_tail": "",
+      "must_preserve": ["根据体重安排蛋白质"],
+      "budget_tokens": 120,
+      "expected_mode": "full"
+    },
+    {
+      "id": "no_budget_drop",
+      "kind": "tool",
+      "title": "低优先级旧结果",
+      "reference_id": "tool-old-1",
+      "repeat_text": "旧工具结果。",
+      "repeat": 10,
+      "critical_tail": "",
+      "must_preserve": [],
+      "budget_tokens": 0,
+      "expected_mode": "dropped"
+    }
+  ]
+}
