@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -160,12 +161,134 @@ def _run_view(browser, width: int, height: int, output: Path) -> None:
     page.close()
 
 
+def _run_send_lock_probe(browser) -> None:
+    """A same-tick double click must create and stream exactly once."""
+    calls = {"create": 0, "stream": 0}
+
+    def route_api(route: Route) -> None:
+        request = route.request
+        path = urlparse(request.url).path
+        if path == "/api/chat/conversations" and request.method == "GET":
+            _json(route, [])
+            return
+        if path == "/api/chat/memories" and request.method == "GET":
+            _json(route, [])
+            return
+        if path == "/api/chat/conversations" and request.method == "POST":
+            calls["create"] += 1
+            _json(route, {
+                "id": 100 + calls["create"],
+                "user_id": 1,
+                "title": "新对话",
+                "status": "active",
+                "created_at": NOW,
+                "updated_at": NOW,
+                "last_message": "",
+            })
+            return
+        if path.endswith("/messages/stream"):
+            calls["stream"] += 1
+            message = {
+                "id": 200 + calls["stream"],
+                "role": "assistant",
+                "content": "已完成",
+                "citations": [],
+                "context": {"tool_calls": []},
+                "status": "completed",
+                "created_at": NOW,
+            }
+            body = (
+                'event: delta\ndata: {"content":"已完成"}\n\n'
+                f"event: done\ndata: {json.dumps(message, ensure_ascii=False)}\n\n"
+            )
+            route.fulfill(
+                status=200,
+                content_type="text/event-stream; charset=utf-8",
+                body=body,
+            )
+            return
+        route.fulfill(status=404, body="not mocked")
+
+    page = browser.new_page()
+    page.add_init_script("localStorage.setItem('userId', '1')")
+    page.route("**/api/chat/**", route_api)
+    page.goto(BASE_URL)
+    page.wait_for_load_state("networkidle")
+    page.get_by_placeholder("输入你的饮食、训练或计划问题").fill("并发发送检查")
+    page.evaluate("""
+        const button = document.querySelector('button[title="发送"]')
+        button.click()
+        button.click()
+    """)
+    page.get_by_text("已完成").wait_for()
+    assert calls == {"create": 1, "stream": 1}, f"send lock failed: {calls}"
+    page.close()
+
+
+def _run_cancel_during_conversation_creation_probe(browser) -> None:
+    calls = {"stream": 0, "archive": 0}
+
+    def route_api(route: Route) -> None:
+        request = route.request
+        path = urlparse(request.url).path
+        if path == "/api/chat/conversations" and request.method == "GET":
+            _json(route, [])
+            return
+        if path == "/api/chat/memories" and request.method == "GET":
+            _json(route, [])
+            return
+        if path == "/api/chat/conversations" and request.method == "POST":
+            time.sleep(0.3)
+            _json(route, {
+                "id": 301,
+                "user_id": 1,
+                "title": "新对话",
+                "status": "active",
+                "created_at": NOW,
+                "updated_at": NOW,
+                "last_message": "",
+            })
+            return
+        if path == "/api/chat/conversations/301" and request.method == "DELETE":
+            calls["archive"] += 1
+            _json(route, {"status": "archived"})
+            return
+        if path.endswith("/messages/stream"):
+            calls["stream"] += 1
+            route.fulfill(status=500, body="must not stream after early cancel")
+            return
+        route.fulfill(status=404, body="not mocked")
+
+    page = browser.new_page()
+    page.add_init_script("localStorage.setItem('userId', '1')")
+    page.route("**/api/chat/**", route_api)
+    page.goto(BASE_URL)
+    page.wait_for_load_state("networkidle")
+    draft = "创建会话时取消"
+    page.get_by_placeholder("输入你的饮食、训练或计划问题").fill(draft)
+    page.evaluate("""
+        document.querySelector('button[title="发送"]').click()
+        setTimeout(() => {
+          document.querySelector('button[title="停止生成"]')?.click()
+        }, 20)
+    """)
+    page.wait_for_timeout(800)
+    assert calls["stream"] == 0
+    assert calls["archive"] == 1
+    assert page.locator(".message-row").count() == 0
+    assert page.locator(".conversation-item").count() == 0
+    assert page.get_by_placeholder("输入你的饮食、训练或计划问题").input_value() == draft
+    page.close()
+
+
 def main() -> None:
     output_dir = Path(tempfile.mkdtemp(prefix="slimagent-m6-ui-"))
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         _run_view(browser, 1440, 900, output_dir / "desktop.png")
         _run_view(browser, 390, 844, output_dir / "mobile.png")
+        _run_send_lock_probe(browser)
+        _run_cancel_during_conversation_creation_probe(browser)
         browser.close()
     print(f"chat tool UI verified; screenshots={output_dir}")
 

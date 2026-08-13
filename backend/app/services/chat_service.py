@@ -6,6 +6,7 @@ import logging
 from datetime import datetime
 from typing import Any, AsyncIterator
 
+import anyio
 from langchain_openai import ChatOpenAI
 from sqlalchemy import desc, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -25,6 +26,7 @@ from app.services.memory_retrieval_service import (
 
 _CHAT_GRAPH = build_chat_graph()
 logger = logging.getLogger(__name__)
+_CANCELLATION_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 
 def _json_load(value: str, fallback: Any) -> Any:
@@ -32,6 +34,73 @@ def _json_load(value: str, fallback: Any) -> Any:
         return json.loads(value) if value else fallback
     except (TypeError, json.JSONDecodeError):
         return fallback
+
+
+async def _persist_cancelled_assistant(
+    db: AsyncSession,
+    assistant_message_id: int | None,
+    *,
+    content: str,
+    citations_json: str = "[]",
+    context_json: str = "{}",
+) -> None:
+    """Repair a pending assistant outside the request's cancelled scope."""
+    if assistant_message_id is None:
+        return
+
+    cleanup_timed_out = False
+    with anyio.CancelScope(shield=True):
+        with anyio.move_on_after(_CANCELLATION_CLEANUP_TIMEOUT_SECONDS) as scope:
+            try:
+                # A cancelled SQLAlchemy operation must be rolled back before its
+                # connection can be safely returned to the pool. Persist the
+                # terminal state in a fresh session so an interrupted request
+                # transaction cannot swallow the repair.
+                await db.rollback()
+            except Exception as exc:
+                logger.error(
+                    "Cancelled chat session rollback failed",
+                    extra={
+                        "assistant_message_id": assistant_message_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+
+            try:
+                repair_session_factory = async_sessionmaker(
+                    db.bind,
+                    expire_on_commit=False,
+                )
+                async with repair_session_factory() as repair_db:
+                    await repair_db.execute(
+                        update(ChatMessage)
+                        .where(
+                            ChatMessage.id == assistant_message_id,
+                            ChatMessage.status == "pending",
+                        )
+                        .values(
+                            status="stopped",
+                            content=content,
+                            citations_json=citations_json,
+                            context_json=context_json,
+                        )
+                    )
+                    await repair_db.commit()
+            except Exception as exc:
+                logger.error(
+                    "Cancelled chat message repair failed",
+                    extra={
+                        "assistant_message_id": assistant_message_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+        cleanup_timed_out = scope.cancel_called
+
+    if cleanup_timed_out:
+        logger.error(
+            "Cancelled chat message repair timed out",
+            extra={"assistant_message_id": assistant_message_id},
+        )
 
 
 def _profile_context(user: User | None) -> dict[str, Any]:
@@ -166,13 +235,10 @@ async def archive_conversation(
     return True
 
 
-async def _load_agent_context(
+async def _load_legacy_profile_plan(
     db: AsyncSession,
     conversation: ChatConversation,
-    current_page: str,
-    page_context: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any] | None, list[ChatMessage]]:
-    settings = get_settings()
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     user = await db.get(User, conversation.user_id)
     plan_stmt = (
         select(Plan)
@@ -181,14 +247,21 @@ async def _load_agent_context(
         .limit(1)
     )
     plan = (await db.execute(plan_stmt)).scalar_one_or_none()
+    return _profile_context(user), _plan_context(plan)
+
+
+async def _load_chat_history(
+    db: AsyncSession,
+    conversation_id: int,
+) -> list[ChatMessage]:
+    settings = get_settings()
     history_stmt = (
         select(ChatMessage)
-        .where(ChatMessage.conversation_id == conversation.id)
+        .where(ChatMessage.conversation_id == conversation_id)
         .order_by(desc(ChatMessage.id))
         .limit(settings.CHAT_CONTEXT_MAX_HISTORY_MESSAGES)
     )
-    history = list(reversed((await db.execute(history_stmt)).scalars().all()))
-    return _profile_context(user), _plan_context(plan), history
+    return list(reversed((await db.execute(history_stmt)).scalars().all()))
 
 
 def _chat_llm() -> ChatOpenAI:
@@ -250,61 +323,53 @@ async def stream_chat_message(
         content=content.strip(),
         status="completed",
     )
-    db.add(user_message)
-    if conversation.title == "新对话":
-        conversation.title = content.strip()[:30]
-    conversation.updated_at = datetime.utcnow()
-    await db.commit()
-    conversation_db_id = conversation.id
-    user_message_id = user_message.id
-
-    profile, latest_plan, history = await _load_agent_context(
-        db, conversation, current_page, page_context or {}
-    )
-    memory_recall_result = None
-    memory_retrieval_run_id = None
-    try:
-        memory_recall_result, memory_retrieval_run_id = await retrieve_user_memory_result(
-            db,
-            user_id,
-            content,
-            consumer="chat",
-            conversation_id=conversation_db_id,
-            source_message_id=user_message_id,
-        )
-        long_term_memories = memory_recall_result.memories
-    except Exception as exc:
-        long_term_memories = []
-        logger.warning(
-            "Long-term memory recall failed; continuing without memories",
-            extra={"user_id": user_id, "error_type": type(exc).__name__},
-        )
-    summary = await get_latest_completed_summary(db, conversation_db_id)
-    state: ChatAgentState = {
-        "user_message": content,
-        "current_page": current_page,
-        "profile": profile,
-        "latest_plan": latest_plan,
-        "page_context": page_context or {},
-        "risk_level": "normal",
-        "risk_notice": "",
-        "retrieved_knowledge": [],
-        "citations": [],
-        "long_term_memories": long_term_memories,
-    }
-
     assistant_message = ChatMessage(
-        conversation_id=conversation_db_id,
+        conversation_id=conversation.id,
         role="assistant",
         content="",
         status="pending",
     )
-    db.add(assistant_message)
-    await db.commit()
-    await db.refresh(assistant_message)
-    assistant_message_id = assistant_message.id
+    db.add_all([user_message, assistant_message])
+    if conversation.title == "新对话":
+        conversation.title = content.strip()[:30]
+    conversation.updated_at = datetime.utcnow()
+    assistant_message_id: int | None = None
+    try:
+        await db.flush()
+        assistant_message_id = assistant_message.id
+        await db.commit()
+    except asyncio.CancelledError:
+        await _persist_cancelled_assistant(
+            db,
+            assistant_message_id,
+            content="已停止生成。",
+        )
+        raise
+    conversation_db_id = conversation.id
+    user_message_id = user_message.id
+    if assistant_message_id is None:
+        raise RuntimeError("assistant message ID was not assigned")
+    chunks: list[str] = []
+    persisted_citations_json = "[]"
+    persisted_context_json = "{}"
 
     try:
+        history = await _load_chat_history(db, conversation_db_id)
+        summary = await get_latest_completed_summary(db, conversation_db_id)
+        memory_recall_result = None
+        memory_retrieval_run_id = None
+        state: ChatAgentState = {
+            "user_message": content,
+            "current_page": current_page,
+            "profile": {},
+            "latest_plan": None,
+            "page_context": page_context or {},
+            "risk_level": "normal",
+            "risk_notice": "",
+            "retrieved_knowledge": [],
+            "citations": [],
+            "long_term_memories": [],
+        }
         settings = get_settings()
         tool_report = ToolAgentReport()
         result: dict[str, Any] = {**state, **assess_risk(state)}
@@ -325,21 +390,41 @@ async def stream_chat_message(
                     current_page=current_page,
                     planner=_chat_planner_llm(),
                 )
-            if tool_report.degraded:
-                result = await _CHAT_GRAPH.ainvoke(state)
-            else:
-                # Successful tool routing replaces the legacy always-injected
-                # profile/plan payloads. Selected tool artifacts are smaller,
-                # traceable, and share the same context budget without duplicates.
-                result["profile"] = {}
-                result["latest_plan"] = None
-                if any(
-                    trace.tool_name == "search_memories"
-                    and trace.status == "completed"
-                    for trace in tool_report.traces
-                ):
-                    result["long_term_memories"] = []
-        else:
+        completed_tool_names = {
+            trace.tool_name
+            for trace in tool_report.traces
+            if trace.status == "completed"
+        }
+        needs_legacy_context = (
+            not settings.CHAT_TOOL_AGENT_ENABLED or tool_report.degraded
+        )
+        if needs_legacy_context:
+            profile, latest_plan = await _load_legacy_profile_plan(db, conversation)
+            state["profile"] = profile
+            state["latest_plan"] = latest_plan
+            if "search_memories" not in completed_tool_names:
+                try:
+                    memory_recall_result, memory_retrieval_run_id = (
+                        await retrieve_user_memory_result(
+                            db,
+                            user_id,
+                            content,
+                            consumer="chat",
+                            conversation_id=conversation_db_id,
+                            source_message_id=user_message_id,
+                        )
+                    )
+                    state["long_term_memories"] = memory_recall_result.memories
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "Long-term memory recall failed; continuing without memories",
+                        extra={
+                            "user_id": user_id,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
             result = await _CHAT_GRAPH.ainvoke(state)
         result["tool_artifacts"] = tool_report.artifacts
         built_context = build_chat_context(
@@ -416,36 +501,70 @@ async def stream_chat_message(
         automatic_memory_ids = list(
             built_context.diagnostics.get("long_term_memory_ids", [])
         )
-        tool_memory_ids = [
-            int(memory_id)
+        included_tool_memory_usages = [
+            usage
             for usage in tool_report.memory_usages
             if usage.get("tool_reference_id") in included_tool_references
+        ]
+        tool_memory_ids = [
+            int(memory_id)
+            for usage in included_tool_memory_usages
             for memory_id in usage.get("memory_ids") or []
         ]
         effective_memory_ids = list(dict.fromkeys([
             *automatic_memory_ids,
             *tool_memory_ids,
         ]))
+        memory_retrieval_runs: list[dict[str, Any]] = []
+        if memory_recall_result is not None:
+            memory_retrieval_runs.append({
+                "run_id": memory_retrieval_run_id,
+                "memory_ids": automatic_memory_ids,
+                "effective_mode": memory_recall_result.effective_mode,
+                "degraded": memory_recall_result.degraded,
+            })
+        memory_retrieval_runs.extend(
+            {
+                "run_id": usage.get("run_id"),
+                "memory_ids": [
+                    int(memory_id) for memory_id in usage.get("memory_ids") or []
+                ],
+                "effective_mode": usage.get("effective_mode"),
+                "degraded": bool(usage.get("degraded")),
+            }
+            for usage in included_tool_memory_usages
+        )
+        single_memory_run = (
+            memory_retrieval_runs[0]
+            if len(memory_retrieval_runs) == 1
+            else None
+        )
         context_summary = {
             "current_page": current_page,
             "has_profile": bool(result.get("profile"))
             or "get_user_profile" in included_tool_names,
             "latest_plan_id": effective_plan_id,
             "risk_level": result["risk_level"],
-            "knowledge_count": len(result["retrieved_knowledge"]),
+            # Count only citations that survived the shared context budget.
+            # Tool-only knowledge lives outside the legacy RAG result array.
+            "knowledge_count": len(effective_citations),
             "memory_count": len(effective_memory_ids),
             "memory_ids": effective_memory_ids,
-            "memory_retrieval_run_id": memory_retrieval_run_id,
+            # Scalar fields remain compatible for the normal one-retrieval case.
+            # Multiple distinct runs are represented only by the structured list
+            # so mode/run/degraded values can never be mixed across executions.
+            "memory_retrieval_run_id": (
+                single_memory_run.get("run_id") if single_memory_run else None
+            ),
             "memory_retrieval_mode": (
-                memory_recall_result.effective_mode
-                if memory_recall_result is not None
+                single_memory_run.get("effective_mode")
+                if single_memory_run
                 else None
             ),
-            "memory_retrieval_degraded": (
-                memory_recall_result.degraded
-                if memory_recall_result is not None
-                else False
+            "memory_retrieval_degraded": any(
+                bool(run["degraded"]) for run in memory_retrieval_runs
             ),
+            "memory_retrieval_runs": memory_retrieval_runs,
             "tool_agent_enabled": settings.CHAT_TOOL_AGENT_ENABLED,
             "tool_agent_degraded": tool_report.degraded,
             "tool_agent_degradation_reason": tool_report.degradation_reason,
@@ -453,6 +572,12 @@ async def stream_chat_message(
             "tool_calls": tool_traces,
             "context_budget": built_context.diagnostics,
         }
+        persisted_citations_json = json.dumps(
+            effective_citations, ensure_ascii=False
+        )
+        persisted_context_json = json.dumps(
+            context_summary, ensure_ascii=False
+        )
         await mark_memory_hits_included(
             db,
             memory_retrieval_run_id,
@@ -474,7 +599,6 @@ async def stream_chat_message(
         for trace in tool_traces:
             yield {"event": "tool", "data": trace}
 
-        chunks: list[str] = []
         async for chunk in _chat_llm().astream(built_context.messages):
             text = chunk.content if isinstance(chunk.content, str) else ""
             if not text:
@@ -483,13 +607,11 @@ async def stream_chat_message(
             yield {"event": "delta", "data": {"content": text}}
 
         answer = "".join(chunks).strip()
+        if not answer:
+            raise RuntimeError("chat model returned an empty response")
         assistant_message.content = answer
-        assistant_message.citations_json = json.dumps(
-            effective_citations, ensure_ascii=False
-        )
-        assistant_message.context_json = json.dumps(
-            context_summary, ensure_ascii=False
-        )
+        assistant_message.citations_json = persisted_citations_json
+        assistant_message.context_json = persisted_context_json
         assistant_message.status = "completed"
         conversation.updated_at = datetime.utcnow()
         await db.commit()
@@ -502,20 +624,31 @@ async def stream_chat_message(
             "internal": {"source_message_id": user_message_id},
         }
     except asyncio.CancelledError:
-        await db.rollback()
-        await db.execute(
-            update(ChatMessage)
-            .where(ChatMessage.id == assistant_message_id)
-            .values(status="stopped", content="已停止生成。")
+        partial_answer = "".join(chunks).strip()
+        await _persist_cancelled_assistant(
+            db,
+            assistant_message_id,
+            content=partial_answer or "已停止生成。",
+            citations_json=persisted_citations_json,
+            context_json=persisted_context_json,
         )
-        await db.commit()
         raise
-    except Exception:
+    except Exception as exc:
         await db.rollback()
+        partial_answer = "".join(chunks).strip()
+        logger.warning(
+            "Chat response generation failed",
+            extra={"error_type": type(exc).__name__},
+        )
         await db.execute(
             update(ChatMessage)
             .where(ChatMessage.id == assistant_message_id)
-            .values(status="failed", content="生成失败，请稍后重试。")
+            .values(
+                status="failed",
+                content=partial_answer or "生成失败，请稍后重试。",
+                citations_json=persisted_citations_json,
+                context_json=persisted_context_json,
+            )
         )
         await db.commit()
         yield {

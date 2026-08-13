@@ -308,6 +308,7 @@ async def run_chat_tool_agent(
         return ToolAgentReport(degraded=True, degradation_reason="PLANNER_ERROR")
 
     report = ToolAgentReport(selected_count=len(state.get("tool_calls") or []))
+    execution_failed = False
     for execution in state.get("executions") or []:
         name = execution["tool_name"]
         envelope = execution.get("envelope") or {}
@@ -326,6 +327,7 @@ async def run_chat_tool_agent(
         )
         report.traces.append(trace)
         if execution["status"] != "completed":
+            execution_failed = True
             continue
         report.artifacts.append({
             "kind": "tool",
@@ -346,4 +348,7 @@ async def run_chat_tool_agent(
                 **memory_usage,
                 "tool_reference_id": reference_id,
             })
+    if execution_failed:
+        report.degraded = True
+        report.degradation_reason = "TOOL_EXECUTION_FAILED"
     return report

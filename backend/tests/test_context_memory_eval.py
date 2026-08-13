@@ -13,7 +13,7 @@ from app.evals.context_memory import (
     run_baseline,
 )
 from app.models.user import ChatConversation, ChatMessage, User
-from app.services.chat_service import _load_agent_context
+from app.services.chat_service import _load_chat_history
 from app.services.token_estimator import estimate_tokens
 
 
@@ -121,12 +121,7 @@ class CurrentChatContextLoaderTests(unittest.IsolatedAsyncioTestCase):
             )
             await session.commit()
 
-            _, _, history = await _load_agent_context(
-                session,
-                conversation,
-                "chat",
-                {},
-            )
+            history = await _load_chat_history(session, conversation.id)
 
         self.assertEqual(len(history), 12)
         self.assertEqual(history[0].content, "message-01")

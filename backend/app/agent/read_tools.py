@@ -475,7 +475,12 @@ def build_chat_read_tools(
                 _source("memory", item["memory_id"], item["memory_key"])
                 for item in items
             ],
-            memory_usage={"run_id": run_id, "memory_ids": memory_ids},
+            memory_usage={
+                "run_id": run_id,
+                "memory_ids": memory_ids,
+                "effective_mode": result.effective_mode,
+                "degraded": result.degraded,
+            },
         )
 
     definitions = (

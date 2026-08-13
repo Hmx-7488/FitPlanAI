@@ -52,6 +52,7 @@ const memoryActionId = ref<number | null>(null)
 const memoryError = ref('')
 const messageList = ref<HTMLElement | null>(null)
 let abortController: AbortController | null = null
+let conversationCreation: Promise<number | null> | null = null
 
 const activeConversation = computed(() =>
   conversations.value.find(item => item.id === activeConversationId.value)
@@ -201,18 +202,32 @@ async function openConversation(id: number) {
   }
 }
 
+async function createAndActivateConversation(): Promise<number | null> {
+  if (conversationCreation) return conversationCreation
+  const pending = (async () => {
+    try {
+      const created = await createChatConversation(userId)
+      conversations.value.unshift(created)
+      activeConversationId.value = created.id
+      messages.value = []
+      sidebarOpen.value = false
+      return created.id
+    } catch {
+      errorMessage.value = '新建会话失败'
+      return null
+    }
+  })()
+  conversationCreation = pending
+  try {
+    return await pending
+  } finally {
+    if (conversationCreation === pending) conversationCreation = null
+  }
+}
+
 async function newConversation() {
   if (!userId || generating.value) return
-  try {
-    const created = await createChatConversation(userId)
-    conversations.value.unshift(created)
-    activeConversationId.value = created.id
-    messages.value = []
-    input.value = ''
-    sidebarOpen.value = false
-  } catch {
-    errorMessage.value = '新建会话失败'
-  }
+  if (await createAndActivateConversation()) input.value = ''
 }
 
 async function archiveConversation(event: Event, id: number) {
@@ -229,26 +244,47 @@ async function archiveConversation(event: Event, id: number) {
 
 async function ensureConversation(): Promise<number | null> {
   if (activeConversationId.value) return activeConversationId.value
-  await newConversation()
-  return activeConversationId.value
+  return createAndActivateConversation()
+}
+
+async function discardEmptyConversation(conversationId: number) {
+  try {
+    await archiveChatConversation(conversationId, userId)
+    conversations.value = conversations.value.filter(item => item.id !== conversationId)
+    if (activeConversationId.value === conversationId) {
+      activeConversationId.value = null
+      messages.value = []
+    }
+  } catch {
+    errorMessage.value = '已停止生成，但空会话清理失败'
+  }
 }
 
 async function sendMessage(content = input.value) {
   const text = content.trim()
   if (!text || generating.value || !userId) return
-  const conversationId = await ensureConversation()
-  if (!conversationId) return
-
-  input.value = ''
-  errorMessage.value = ''
-  const userMessage = localMessage('user', text)
-  const assistantMessage = localMessage('assistant', '')
-  messages.value.push(userMessage, assistantMessage)
+  const needsNewConversation = activeConversationId.value === null
   generating.value = true
-  abortController = new AbortController()
-  await scrollToBottom()
+  const controller = new AbortController()
+  abortController = controller
+  let assistantMessage: ChatMessage | null = null
 
   try {
+    const conversationId = await ensureConversation()
+    if (!conversationId) return
+    if (controller.signal.aborted) {
+      if (needsNewConversation) await discardEmptyConversation(conversationId)
+      input.value = text
+      return
+    }
+
+    input.value = ''
+    errorMessage.value = ''
+    const userMessage = localMessage('user', text)
+    assistantMessage = localMessage('assistant', '')
+    messages.value.push(userMessage, assistantMessage)
+    await scrollToBottom()
+
     await streamChatMessage(
       conversationId,
       {
@@ -259,34 +295,40 @@ async function sendMessage(content = input.value) {
       },
       {
         onDelta(delta) {
-          assistantMessage.content += delta
+          if (assistantMessage) assistantMessage.content += delta
           scrollToBottom()
         },
         onTool(data) {
-          applyToolTrace(assistantMessage, data as unknown as ChatToolTrace)
+          if (assistantMessage) {
+            applyToolTrace(assistantMessage, data as unknown as ChatToolTrace)
+          }
           scrollToBottom()
         },
         onCitations(data) {
-          assistantMessage.citations = data as ChatCitation[]
+          if (assistantMessage) assistantMessage.citations = data as ChatCitation[]
         },
         onDone(data) {
-          Object.assign(assistantMessage, data as ChatMessage)
+          if (assistantMessage) Object.assign(assistantMessage, data as ChatMessage)
         },
         onError(message) {
           errorMessage.value = message
-          assistantMessage.status = 'failed'
-          if (!assistantMessage.content) assistantMessage.content = '生成失败，请稍后重试。'
+          if (assistantMessage) {
+            assistantMessage.status = 'failed'
+            if (!assistantMessage.content) assistantMessage.content = '生成失败，请稍后重试。'
+          }
         },
       },
-      abortController.signal
+      controller.signal
     )
     conversations.value = await getChatConversations(userId)
   } catch (error) {
     if ((error as Error).name !== 'AbortError') {
       errorMessage.value = (error as Error).message || '发送失败'
-      assistantMessage.status = 'failed'
-      if (!assistantMessage.content) assistantMessage.content = '发送失败，请稍后重试。'
-    } else {
+      if (assistantMessage) {
+        assistantMessage.status = 'failed'
+        if (!assistantMessage.content) assistantMessage.content = '发送失败，请稍后重试。'
+      }
+    } else if (assistantMessage) {
       assistantMessage.status = 'stopped'
       if (!assistantMessage.content) assistantMessage.content = '已停止生成。'
     }

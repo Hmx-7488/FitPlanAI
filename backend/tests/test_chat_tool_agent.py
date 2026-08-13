@@ -263,6 +263,10 @@ class ChatToolAgentTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
 
+    def test_chat_message_rejects_whitespace_only_content(self):
+        with self.assertRaises(ValidationError):
+            ChatMessageCreate(user_id=1, content="   \n\t")
+
     def test_tool_source_urls_only_allow_http_protocols(self):
         self.assertEqual(
             _source("knowledge", 1, "可信", "https://example.com/a")["url"],
@@ -357,6 +361,8 @@ class ChatToolAgentTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(report.traces[0].error_code, "TOOL_TIMEOUT")
+        self.assertTrue(report.degraded)
+        self.assertEqual(report.degradation_reason, "TOOL_EXECUTION_FAILED")
         fake_db.rollback.assert_awaited_once()
 
     async def test_client_cancellation_during_tool_rolls_back_session(self):

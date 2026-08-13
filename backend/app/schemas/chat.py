@@ -50,6 +50,14 @@ class ChatMessageCreate(BaseModel):
     current_page: str = Field(default="", max_length=100)
     page_context: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("content")
+    @classmethod
+    def strip_and_require_content(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("message content cannot be blank")
+        return normalized
+
     @field_validator("page_context")
     @classmethod
     def bound_page_context(cls, value: dict[str, Any]) -> dict[str, Any]:
