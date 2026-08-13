@@ -2079,7 +2079,7 @@ class ChatAgentState(TypedDict):
 1. 页面级快捷提问与上下文自动注入。
 2. ~~会话摘要和长期记忆。~~ 已完成 M1-M5.0：增量摘要、覆盖游标、Microcompact、长期记忆治理、混合检索与最小管理入口。
 3. 计划调整草案与确认写入。
-4. 工具调用过程可视化。
+4. ~~工具调用过程可视化。~~ M6A 已完成安全工具台账、来源和实际上下文使用状态。
 5. Agent 离线评测、延迟、Token 和成本监控。
 
 ### 20.6 上下文与记忆升级（M1-M5.0，2026-08-12）
@@ -2187,3 +2187,11 @@ class ChatAgentState(TypedDict):
 完整实现与面试说明见 [[上下文与记忆-M5-混合检索实现记录]]。
 
 下一阶段 M6 将在固定数据集上比较三种模式的 Recall@K、MRR、硬约束漏召回率、延迟和 embedding 成本，并基于指标调节候选窗口与 RRF 参数。
+
+## 23. M6A 只读 Tool-Calling 聊天 Agent（2026-08-13）
+
+聊天主链路新增 qwen 原生 Tool Calling 与单 LangGraph 有界编排器。模型可以从用户档案、最新计划、近期打卡、当日餐食、食物库、动作库、专业知识和长期记忆 8 个只读工具中自主选择最少调用；工具身份由服务端绑定，schema 不暴露 `user_id` 或 SQL。
+
+每轮最多 4 个工具，支持同参去重、单工具超时、结果体积限制和 planner 失败回退。Tool Artifact 仍经过统一 Context Builder 与 Microcompact，SSE 新增 `tool` 事件，前端展示工具状态、来源与“是否用于回答”，不展示 chain-of-thought。固定 10 场景真实 qwen 路由评测 10/10，越权工具调用 0；该结果仅代表小规模离线集。
+
+完整架构、安全边界、评测和面试表达见 [[聊天Agent-M6A-Tool-Calling实现记录]]。

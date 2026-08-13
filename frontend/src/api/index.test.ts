@@ -18,6 +18,7 @@ import {
   applyWorkoutAdjustment,
   confirmIngredients,
   deletePoseAnalysis,
+  streamChatMessage,
 } from './index'
 
 describe('API concurrency and ownership contracts', () => {
@@ -65,5 +66,36 @@ describe('API concurrency and ownership contracts', () => {
   it('uses the owned pose deletion endpoint', async () => {
     await deletePoseAnalysis(7, 'pose_abc')
     expect(remove).toHaveBeenCalledWith('/pose/history/7/pose_abc')
+  })
+})
+
+describe('chat tool event stream', () => {
+  it('dispatches bounded tool trace events separately from answer deltas', async () => {
+    const payload = [
+      'event: meta\ndata: {"tool_call_count":1}\n\n',
+      'event: tool\ndata: {"call_id":"call-plan","tool_name":"get_latest_plan"}\n\n',
+      'event: delta\ndata: {"content":"1900 千卡"}\n\n',
+      'event: done\ndata: {"id":7}\n\n',
+    ].join('')
+    const response = new Response(payload, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response))
+    const onTool = vi.fn()
+    const onDelta = vi.fn()
+
+    await streamChatMessage(
+      3,
+      { user_id: 1, content: '我的热量目标是多少' },
+      { onTool, onDelta }
+    )
+
+    expect(onTool).toHaveBeenCalledWith({
+      call_id: 'call-plan',
+      tool_name: 'get_latest_plan',
+    })
+    expect(onDelta).toHaveBeenCalledWith('1900 千卡')
+    vi.unstubAllGlobals()
   })
 })

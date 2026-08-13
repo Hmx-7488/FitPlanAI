@@ -7,11 +7,13 @@ from datetime import datetime
 from typing import Any, AsyncIterator
 
 from langchain_openai import ChatOpenAI
-from sqlalchemy import desc, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import desc, select, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
-from app.graph.chat_workflow import ChatAgentState, build_chat_graph
+from app.agent.chat_tool_agent import ToolAgentReport, run_chat_tool_agent
+from app.agent.read_tools import ChatReadToolContext
+from app.graph.chat_workflow import ChatAgentState, assess_risk, build_chat_graph
 from app.models.user import ChatConversation, ChatMessage, Plan, User
 from app.services.artifact_microcompact import MicrocompactPolicy
 from app.services.context_builder import ContextBudget, build_chat_context
@@ -203,6 +205,32 @@ def _chat_llm() -> ChatOpenAI:
     )
 
 
+def _chat_planner_llm() -> ChatOpenAI:
+    settings = get_settings()
+    return ChatOpenAI(
+        model=settings.LLM_MODEL,
+        openai_api_key=settings.LLM_API_KEY,
+        openai_api_base=settings.LLM_BASE_URL,
+        temperature=0.1,
+        request_timeout=min(60, settings.CHAT_TOOL_TIMEOUT_SECONDS),
+        max_retries=1,
+        max_tokens=800,
+        streaming=False,
+    )
+
+
+def _deduplicate_citations(citations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for citation in citations:
+        chunk_id = str(citation.get("chunk_id") or "")
+        if not chunk_id or chunk_id in seen:
+            continue
+        seen.add(chunk_id)
+        output.append(citation)
+    return output
+
+
 async def stream_chat_message(
     db: AsyncSession,
     conversation_id: int,
@@ -227,6 +255,8 @@ async def stream_chat_message(
         conversation.title = content.strip()[:30]
     conversation.updated_at = datetime.utcnow()
     await db.commit()
+    conversation_db_id = conversation.id
+    user_message_id = user_message.id
 
     profile, latest_plan, history = await _load_agent_context(
         db, conversation, current_page, page_context or {}
@@ -239,8 +269,8 @@ async def stream_chat_message(
             user_id,
             content,
             consumer="chat",
-            conversation_id=conversation.id,
-            source_message_id=user_message.id,
+            conversation_id=conversation_db_id,
+            source_message_id=user_message_id,
         )
         long_term_memories = memory_recall_result.memories
     except Exception as exc:
@@ -249,7 +279,7 @@ async def stream_chat_message(
             "Long-term memory recall failed; continuing without memories",
             extra={"user_id": user_id, "error_type": type(exc).__name__},
         )
-    summary = await get_latest_completed_summary(db, conversation.id)
+    summary = await get_latest_completed_summary(db, conversation_db_id)
     state: ChatAgentState = {
         "user_message": content,
         "current_page": current_page,
@@ -264,7 +294,7 @@ async def stream_chat_message(
     }
 
     assistant_message = ChatMessage(
-        conversation_id=conversation.id,
+        conversation_id=conversation_db_id,
         role="assistant",
         content="",
         status="pending",
@@ -272,15 +302,51 @@ async def stream_chat_message(
     db.add(assistant_message)
     await db.commit()
     await db.refresh(assistant_message)
+    assistant_message_id = assistant_message.id
 
     try:
-        result = await _CHAT_GRAPH.ainvoke(state)
         settings = get_settings()
+        tool_report = ToolAgentReport()
+        result: dict[str, Any] = {**state, **assess_risk(state)}
+        if settings.CHAT_TOOL_AGENT_ENABLED:
+            tool_session_factory = async_sessionmaker(
+                db.bind,
+                expire_on_commit=False,
+            )
+            async with tool_session_factory() as tool_db:
+                tool_report = await run_chat_tool_agent(
+                    context=ChatReadToolContext(
+                        db=tool_db,
+                        user_id=user_id,
+                        conversation_id=conversation_db_id,
+                        source_message_id=user_message_id,
+                    ),
+                    user_message=content,
+                    current_page=current_page,
+                    planner=_chat_planner_llm(),
+                )
+            if tool_report.degraded:
+                result = await _CHAT_GRAPH.ainvoke(state)
+            else:
+                # Successful tool routing replaces the legacy always-injected
+                # profile/plan payloads. Selected tool artifacts are smaller,
+                # traceable, and share the same context budget without duplicates.
+                result["profile"] = {}
+                result["latest_plan"] = None
+                if any(
+                    trace.tool_name == "search_memories"
+                    and trace.status == "completed"
+                    for trace in tool_report.traces
+                ):
+                    result["long_term_memories"] = []
+        else:
+            result = await _CHAT_GRAPH.ainvoke(state)
+        result["tool_artifacts"] = tool_report.artifacts
         built_context = build_chat_context(
             state=result,
             history=history,
             current_user_content=content,
-            current_user_message_id=user_message.id,
+            current_user_message_id=user_message_id,
             budget=ContextBudget(
                 context_window_tokens=settings.CHAT_CONTEXT_WINDOW_TOKENS,
                 max_output_tokens=settings.CHAT_CONTEXT_MAX_OUTPUT_TOKENS,
@@ -296,23 +362,79 @@ async def stream_chat_message(
                 ),
             ),
         )
-        effective_citations = [
+        legacy_citations = [
             result["citations"][index]
             for index in built_context.included_citation_indexes
             if index < len(result["citations"])
         ]
+        included_tool_references = set(
+            built_context.included_tool_reference_ids
+        )
+        tool_citations = [
+            {
+                key: value
+                for key, value in citation.items()
+                if key != "tool_reference_id"
+            }
+            for citation in tool_report.citations
+            if citation.get("tool_reference_id") in included_tool_references
+        ]
+        effective_citations = _deduplicate_citations(
+            [*legacy_citations, *tool_citations]
+        )
+        for trace in tool_report.traces:
+            trace.included_in_answer = (
+                f"tool:{trace.call_id}" in included_tool_references
+            )
+        tool_traces = [trace.to_dict() for trace in tool_report.traces]
+        included_tool_names = {
+            trace.tool_name for trace in tool_report.traces
+            if trace.included_in_answer
+        }
+        effective_plan_id = (
+            (result.get("latest_plan") or {}).get("id")
+            if isinstance(result.get("latest_plan"), dict)
+            else None
+        )
+        if effective_plan_id is None and "get_latest_plan" in included_tool_names:
+            for trace in tool_report.traces:
+                if trace.tool_name != "get_latest_plan":
+                    continue
+                plan_source = next(
+                    (
+                        source for source in trace.sources
+                        if source.get("source_type") == "plan"
+                    ),
+                    None,
+                )
+                if plan_source is not None:
+                    try:
+                        effective_plan_id = int(plan_source.get("source_id"))
+                    except (TypeError, ValueError):
+                        effective_plan_id = None
+                break
+        automatic_memory_ids = list(
+            built_context.diagnostics.get("long_term_memory_ids", [])
+        )
+        tool_memory_ids = [
+            int(memory_id)
+            for usage in tool_report.memory_usages
+            if usage.get("tool_reference_id") in included_tool_references
+            for memory_id in usage.get("memory_ids") or []
+        ]
+        effective_memory_ids = list(dict.fromkeys([
+            *automatic_memory_ids,
+            *tool_memory_ids,
+        ]))
         context_summary = {
             "current_page": current_page,
-            "has_profile": bool(profile),
-            "latest_plan_id": latest_plan.get("id") if latest_plan else None,
+            "has_profile": bool(result.get("profile"))
+            or "get_user_profile" in included_tool_names,
+            "latest_plan_id": effective_plan_id,
             "risk_level": result["risk_level"],
             "knowledge_count": len(result["retrieved_knowledge"]),
-            "memory_count": len(
-                built_context.diagnostics.get("long_term_memory_ids", [])
-            ),
-            "memory_ids": built_context.diagnostics.get(
-                "long_term_memory_ids", []
-            ),
+            "memory_count": len(effective_memory_ids),
+            "memory_ids": effective_memory_ids,
             "memory_retrieval_run_id": memory_retrieval_run_id,
             "memory_retrieval_mode": (
                 memory_recall_result.effective_mode
@@ -324,18 +446,33 @@ async def stream_chat_message(
                 if memory_recall_result is not None
                 else False
             ),
+            "tool_agent_enabled": settings.CHAT_TOOL_AGENT_ENABLED,
+            "tool_agent_degraded": tool_report.degraded,
+            "tool_agent_degradation_reason": tool_report.degradation_reason,
+            "tool_call_count": tool_report.selected_count,
+            "tool_calls": tool_traces,
             "context_budget": built_context.diagnostics,
         }
         await mark_memory_hits_included(
             db,
             memory_retrieval_run_id,
-            built_context.diagnostics.get("long_term_memory_ids", []),
+            automatic_memory_ids,
         )
+        for usage in tool_report.memory_usages:
+            if usage.get("tool_reference_id") not in included_tool_references:
+                continue
+            await mark_memory_hits_included(
+                db,
+                usage.get("run_id"),
+                [int(item) for item in usage.get("memory_ids") or []],
+            )
         yield {
             "event": "meta",
             "data": context_summary,
-            "internal": {"source_message_id": user_message.id},
+            "internal": {"source_message_id": user_message_id},
         }
+        for trace in tool_traces:
+            yield {"event": "tool", "data": trace}
 
         chunks: list[str] = []
         async for chunk in _chat_llm().astream(built_context.messages):
@@ -362,19 +499,27 @@ async def stream_chat_message(
         yield {
             "event": "done",
             "data": _message_payload(assistant_message),
-            "internal": {"source_message_id": user_message.id},
+            "internal": {"source_message_id": user_message_id},
         }
     except asyncio.CancelledError:
-        assistant_message.status = "stopped"
-        assistant_message.content = assistant_message.content or "已停止生成。"
+        await db.rollback()
+        await db.execute(
+            update(ChatMessage)
+            .where(ChatMessage.id == assistant_message_id)
+            .values(status="stopped", content="已停止生成。")
+        )
         await db.commit()
         raise
     except Exception:
-        assistant_message.status = "failed"
-        assistant_message.content = "生成失败，请稍后重试。"
+        await db.rollback()
+        await db.execute(
+            update(ChatMessage)
+            .where(ChatMessage.id == assistant_message_id)
+            .values(status="failed", content="生成失败，请稍后重试。")
+        )
         await db.commit()
         yield {
             "event": "error",
             "data": {"message": "AI 服务暂时不可用，请稍后重试。"},
-            "internal": {"source_message_id": user_message.id},
+            "internal": {"source_message_id": user_message_id},
         }

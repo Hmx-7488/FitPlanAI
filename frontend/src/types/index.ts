@@ -510,6 +510,26 @@ export interface ChatCitation {
   score: number
 }
 
+export interface ChatToolSource {
+  source_type: string
+  source_id: string
+  title: string
+  url: string
+}
+
+export interface ChatToolTrace {
+  call_id: string
+  tool_name: string
+  label: string
+  status: 'completed' | 'failed'
+  summary: string
+  source_count: number
+  duration_ms: number
+  error_code: string
+  included_in_answer: boolean
+  sources: ChatToolSource[]
+}
+
 export interface ChatMessage {
   id: number
   role: 'user' | 'assistant' | 'system'

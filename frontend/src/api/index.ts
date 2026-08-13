@@ -456,6 +456,7 @@ export async function deleteUserMemory(memoryId: number, userId: number): Promis
 
 export interface ChatStreamCallbacks {
   onMeta?: (data: Record<string, unknown>) => void
+  onTool?: (data: Record<string, unknown>) => void
   onDelta?: (content: string) => void
   onCitations?: (data: unknown[]) => void
   onDone?: (data: unknown) => void
@@ -497,6 +498,7 @@ export async function streamChatMessage(
     if (!dataLines.length) return
     const data = JSON.parse(dataLines.join('\n'))
     if (eventName === 'meta') callbacks.onMeta?.(data)
+    if (eventName === 'tool') callbacks.onTool?.(data)
     if (eventName === 'delta') callbacks.onDelta?.(data.content || '')
     if (eventName === 'citations') callbacks.onCitations?.(data)
     if (eventName === 'done') callbacks.onDone?.(data)

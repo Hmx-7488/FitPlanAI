@@ -1,11 +1,15 @@
 import tempfile
 import unittest
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage
+from langchain_core.tools import StructuredTool
+from pydantic import BaseModel
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -14,6 +18,7 @@ from app.graph.chat_workflow import assess_risk
 from app.main import app
 from app.models.user import ChatMessage, User
 from app.services import chat_service
+from app.agent.chat_tool_agent import ToolAgentReport, ToolTrace
 
 
 class ChatWorkflowTests(unittest.TestCase):
@@ -115,6 +120,23 @@ class ChatApiTests(unittest.TestCase):
         )
         self.assertEqual(stream.status_code, 404)
 
+    def test_stream_rejects_oversized_page_context(self):
+        created = self.client.post(
+            "/api/chat/conversations",
+            json={"user_id": 1},
+        ).json()
+
+        response = self.client.post(
+            f"/api/chat/conversations/{created['id']}/messages/stream",
+            json={
+                "user_id": 1,
+                "content": "解释当前页面",
+                "page_context": {"payload": "x" * 10001},
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+
     def test_stream_completion_runs_summary_background_check(self):
         created = self.client.post(
             "/api/chat/conversations",
@@ -164,12 +186,30 @@ class _FakeStreamingLlm:
     def __init__(self, chunks=None, error: Exception | None = None):
         self.chunks = chunks or []
         self.error = error
+        self.messages = []
 
-    async def astream(self, _messages):
+    async def astream(self, messages):
+        self.messages = list(messages)
         if self.error:
             raise self.error
         for chunk in self.chunks:
             yield SimpleNamespace(content=chunk)
+
+
+class _BoundToolPlanner:
+    def __init__(self, response):
+        self.response = response
+
+    async def ainvoke(self, _messages):
+        return self.response
+
+
+class _ToolPlanner:
+    def __init__(self, response):
+        self.response = response
+
+    def bind_tools(self, _tools, **_kwargs):
+        return _BoundToolPlanner(self.response)
 
 
 class ChatStreamingTests(unittest.IsolatedAsyncioTestCase):
@@ -228,6 +268,13 @@ class ChatStreamingTests(unittest.IsolatedAsyncioTestCase):
     async def test_completed_stream_persists_answer_and_citations(self):
         async with self.session_factory() as session:
             with patch.object(
+                chat_service,
+                "run_chat_tool_agent",
+                new=AsyncMock(return_value=ToolAgentReport(
+                    degraded=True,
+                    degradation_reason="PLANNER_ERROR",
+                )),
+            ), patch.object(
                 chat_service._CHAT_GRAPH,
                 "ainvoke",
                 new=AsyncMock(return_value=self._graph_result()),
@@ -266,9 +313,81 @@ class ChatStreamingTests(unittest.IsolatedAsyncioTestCase):
                 "chunk-1",
             )
 
+    async def test_tool_trace_is_streamed_and_persisted_with_sources(self):
+        report = ToolAgentReport(
+            traces=[ToolTrace(
+                call_id="call-plan",
+                tool_name="get_latest_plan",
+                label="当前计划",
+                status="completed",
+                summary="已读取当前计划",
+                source_count=1,
+                sources=[{
+                    "source_type": "plan",
+                    "source_id": "11",
+                    "title": "当前计划 #11",
+                    "url": "",
+                }],
+            )],
+            artifacts=[{
+                "kind": "tool",
+                "title": "当前计划",
+                "content": '{"daily_calorie_target":1900}',
+                "reference_id": "tool:call-plan",
+                "score": 1.0,
+            }],
+            selected_count=1,
+        )
+        fake_llm = _FakeStreamingLlm(["目标是 1900 千卡"])
+        async with self.session_factory() as session:
+            with patch.object(
+                chat_service,
+                "run_chat_tool_agent",
+                new=AsyncMock(return_value=report),
+            ), patch.object(
+                chat_service,
+                "_chat_llm",
+                return_value=fake_llm,
+            ):
+                events = [
+                    event async for event in chat_service.stream_chat_message(
+                        session, self.conversation.id, 1, "我的热量目标是多少"
+                    )
+                ]
+
+            self.assertEqual(
+                [event["event"] for event in events],
+                ["meta", "tool", "delta", "citations", "done"],
+            )
+            tool_event = events[1]["data"]
+            self.assertEqual(tool_event["tool_name"], "get_latest_plan")
+            self.assertTrue(tool_event["included_in_answer"])
+            statement = (
+                select(ChatMessage)
+                .where(ChatMessage.role == "assistant")
+                .order_by(desc(ChatMessage.id))
+                .limit(1)
+            )
+            message = (await session.execute(statement)).scalar_one()
+            context = json.loads(message.context_json)
+            self.assertEqual(context["tool_calls"][0]["call_id"], "call-plan")
+            serialized_context = "\n".join(
+                str(item.content) for item in fake_llm.messages
+            )
+            self.assertIn('"daily_calorie_target":1900', serialized_context)
+            self.assertNotIn("权威用户档案", serialized_context)
+            self.assertNotIn("当前有效计划", serialized_context)
+
     async def test_model_failure_persists_failed_status(self):
         async with self.session_factory() as session:
             with patch.object(
+                chat_service,
+                "run_chat_tool_agent",
+                new=AsyncMock(return_value=ToolAgentReport(
+                    degraded=True,
+                    degradation_reason="PLANNER_ERROR",
+                )),
+            ), patch.object(
                 chat_service._CHAT_GRAPH,
                 "ainvoke",
                 new=AsyncMock(return_value=self._graph_result()),
@@ -297,6 +416,13 @@ class ChatStreamingTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_stream_persists_stopped_status(self):
         async with self.session_factory() as session:
             with patch.object(
+                chat_service,
+                "run_chat_tool_agent",
+                new=AsyncMock(return_value=ToolAgentReport(
+                    degraded=True,
+                    degradation_reason="PLANNER_ERROR",
+                )),
+            ), patch.object(
                 chat_service._CHAT_GRAPH,
                 "ainvoke",
                 new=AsyncMock(return_value=self._graph_result()),
@@ -319,3 +445,100 @@ class ChatStreamingTests(unittest.IsolatedAsyncioTestCase):
             )
             message = (await session.execute(statement)).scalar_one()
             self.assertEqual(message.status, "stopped")
+
+    async def test_tool_cancellation_after_rollback_persists_stopped_status(self):
+        async def cancel_after_session_rollback(**kwargs):
+            await kwargs["context"].db.rollback()
+            raise asyncio.CancelledError()
+
+        async with self.session_factory() as session:
+            with patch.object(
+                chat_service,
+                "run_chat_tool_agent",
+                new=cancel_after_session_rollback,
+            ):
+                with self.assertRaises(asyncio.CancelledError):
+                    async for _event in chat_service.stream_chat_message(
+                        session,
+                        self.conversation.id,
+                        1,
+                        "在工具查询时停止",
+                    ):
+                        pass
+
+            statement = (
+                select(ChatMessage)
+                .where(ChatMessage.role == "assistant")
+                .order_by(desc(ChatMessage.id))
+                .limit(1)
+            )
+            message = (await session.execute(statement)).scalar_one()
+            self.assertEqual(message.status, "stopped")
+
+    async def test_tool_timeout_isolated_session_allows_answer_to_complete(self):
+        class NoArgs(BaseModel):
+            pass
+
+        async def slow_tool():
+            await asyncio.sleep(1)
+
+        tool = StructuredTool.from_function(
+            coroutine=slow_tool,
+            name="get_user_profile",
+            description="slow isolated database tool",
+            args_schema=NoArgs,
+        )
+        planner = _ToolPlanner(AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "get_user_profile",
+                "args": {},
+                "id": "provider-id",
+                "type": "tool_call",
+            }],
+        ))
+        agent_settings = SimpleNamespace(
+            CHAT_TOOL_MAX_CALLS=4,
+            CHAT_TOOL_TIMEOUT_SECONDS=0.1,
+            CHAT_TOOL_RESULT_MAX_CHARS=6000,
+        )
+
+        async with self.session_factory() as session:
+            with patch(
+                "app.agent.chat_tool_agent.build_chat_read_tools",
+                return_value={"get_user_profile": tool},
+            ), patch(
+                "app.agent.chat_tool_agent.get_settings",
+                return_value=agent_settings,
+            ), patch.object(
+                chat_service,
+                "_chat_planner_llm",
+                return_value=planner,
+            ), patch.object(
+                chat_service,
+                "_chat_llm",
+                return_value=_FakeStreamingLlm(["仍可完成回答"]),
+            ):
+                events = [
+                    event async for event in chat_service.stream_chat_message(
+                        session,
+                        self.conversation.id,
+                        1,
+                        "读取超时后继续",
+                    )
+                ]
+
+            self.assertEqual(
+                [event["event"] for event in events],
+                ["meta", "tool", "delta", "citations", "done"],
+            )
+            self.assertEqual(events[1]["data"]["error_code"], "TOOL_TIMEOUT")
+            statement = (
+                select(ChatMessage)
+                .where(ChatMessage.role == "assistant")
+                .order_by(desc(ChatMessage.id))
+                .limit(1)
+            )
+            message = (await session.execute(statement)).scalar_one()
+            self.assertEqual(message.status, "completed")
+            self.assertEqual(message.content, "仍可完成回答")

@@ -176,6 +176,34 @@ class ContextBuilderTests(unittest.TestCase):
         self.assertGreater(result.diagnostics["artifact_tokens_saved"], 0)
         self.assertEqual(result.included_citation_indexes, [0])
 
+    def test_tool_artifact_is_bounded_and_traceable(self):
+        result = build_chat_context(
+            state=_state(
+                tool_artifacts=[{
+                    "kind": "tool",
+                    "title": "当前计划",
+                    "content": json.dumps(
+                        {"daily_calorie_target": 1900, "protein_g": 140},
+                        ensure_ascii=False,
+                    ),
+                    "reference_id": "tool:call-plan",
+                    "score": 1.0,
+                }]
+            ),
+            history=[],
+            current_user_content="我的热量目标是多少",
+            current_user_message_id=1,
+            budget=ContextBudget(2400, 100, 100),
+        )
+        joined = "\n".join(str(message.content) for message in result.messages)
+        self.assertIn("1900", joined)
+        self.assertEqual(
+            result.included_tool_reference_ids,
+            ["tool:call-plan"],
+        )
+        self.assertEqual(result.diagnostics["tool_results"], 1)
+        self.assertEqual(result.diagnostics["tool_results_included"], 1)
+
     def test_completed_summary_is_injected_and_diagnosed(self):
         summary = SimpleNamespace(
             id=9,

@@ -90,6 +90,10 @@ class Settings(BaseSettings):
     CHAT_CONTEXT_MAX_OUTPUT_TOKENS: int = 1200
     CHAT_CONTEXT_SAFETY_BUFFER_TOKENS: int = 2048
     CHAT_CONTEXT_MAX_HISTORY_MESSAGES: int = 500
+    CHAT_TOOL_AGENT_ENABLED: bool = True
+    CHAT_TOOL_MAX_CALLS: int = 4
+    CHAT_TOOL_TIMEOUT_SECONDS: float = 15.0
+    CHAT_TOOL_RESULT_MAX_CHARS: int = 6000
     # 会话摘要在响应流结束后异步触发，不阻塞当前回答。
     CHAT_SUMMARY_TRIGGER_TOKENS: int = 6000
     CHAT_SUMMARY_TRIGGER_MESSAGES: int = 40
@@ -161,6 +165,16 @@ class Settings(BaseSettings):
             raise ValueError("chat context reserves must be smaller than the window")
         if self.CHAT_CONTEXT_MAX_HISTORY_MESSAGES <= 0:
             raise ValueError("CHAT_CONTEXT_MAX_HISTORY_MESSAGES must be positive")
+        if not 1 <= self.CHAT_TOOL_MAX_CALLS <= 8:
+            raise ValueError("CHAT_TOOL_MAX_CALLS must be between 1 and 8")
+        if not 0.1 <= self.CHAT_TOOL_TIMEOUT_SECONDS <= 120:
+            raise ValueError(
+                "CHAT_TOOL_TIMEOUT_SECONDS must be between 0.1 and 120"
+            )
+        if not 500 <= self.CHAT_TOOL_RESULT_MAX_CHARS <= 20000:
+            raise ValueError(
+                "CHAT_TOOL_RESULT_MAX_CHARS must be between 500 and 20000"
+            )
         if self.CHAT_SUMMARY_TRIGGER_TOKENS <= 0:
             raise ValueError("CHAT_SUMMARY_TRIGGER_TOKENS must be positive")
         if self.CHAT_SUMMARY_TRIGGER_MESSAGES <= 0:

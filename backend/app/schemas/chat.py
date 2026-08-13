@@ -50,6 +50,38 @@ class ChatMessageCreate(BaseModel):
     current_page: str = Field(default="", max_length=100)
     page_context: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("page_context")
+    @classmethod
+    def bound_page_context(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """Keep untrusted browser context small and structurally predictable."""
+        try:
+            serialized = json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("page context must be JSON serializable") from exc
+        if len(serialized) > 10000:
+            raise ValueError("page context is too large")
+
+        def inspect(node: Any, depth: int = 0) -> int:
+            if depth > 6:
+                raise ValueError("page context is too deeply nested")
+            if isinstance(node, dict):
+                if len(node) > 100:
+                    raise ValueError("page context has too many fields")
+                return 1 + sum(inspect(item, depth + 1) for item in node.values())
+            if isinstance(node, list):
+                if len(node) > 100:
+                    raise ValueError("page context list is too long")
+                return 1 + sum(inspect(item, depth + 1) for item in node)
+            return 1
+
+        if inspect(value) > 500:
+            raise ValueError("page context has too many values")
+        return value
+
 
 class UserMemoryResponse(BaseModel):
     id: int

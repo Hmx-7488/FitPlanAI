@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -58,6 +58,7 @@ class BuiltChatContext:
     messages: list[BaseMessage]
     diagnostics: dict[str, Any]
     included_citation_indexes: list[int]
+    included_tool_reference_ids: list[str] = field(default_factory=list)
 
 
 def _message_tokens(content: str) -> int:
@@ -236,7 +237,7 @@ def build_chat_context(
             truncated_components.append(name)
 
     knowledge_items = list(state.get("retrieved_knowledge") or [])
-    artifact_inputs = [
+    knowledge_inputs = [
         ArtifactInput(
             original_index=index,
             kind="rag",
@@ -253,6 +254,21 @@ def build_chat_context(
         )
         for index, item in enumerate(knowledge_items)
     ]
+    tool_items = list(state.get("tool_artifacts") or [])
+    tool_inputs = [
+        ArtifactInput(
+            original_index=len(knowledge_items) + index,
+            kind="tool",
+            title=str(item.get("title", "")),
+            content=str(item.get("content", "")),
+            reference_id=str(item.get("reference_id") or f"tool-{index + 1}"),
+            score=float(item.get("score") or 0),
+        )
+        for index, item in enumerate(tool_items)
+    ]
+    # Direct structured tool results are higher-priority than generic RAG
+    # context. ``original_index`` still preserves the citation mapping.
+    artifact_inputs = [*tool_inputs, *knowledge_inputs]
     active_microcompact_policy = microcompact_policy or MicrocompactPolicy()
     artifact_preview = microcompact_artifacts(
         artifact_inputs,
@@ -274,10 +290,10 @@ def build_chat_context(
     included_artifacts = [
         artifact for artifact in artifact_batch.artifacts if artifact.mode != "dropped"
     ]
-    knowledge_tokens = artifact_batch.included_tokens
+    artifact_tokens = artifact_batch.included_tokens
 
     # Reuse any knowledge budget that was not needed for older history turns.
-    expanded_history_budget = max(0, available - knowledge_tokens)
+    expanded_history_budget = max(0, available - artifact_tokens)
     selected_history, history_tokens = _select_recent_history(
         prior_history,
         expanded_history_budget,
@@ -286,7 +302,7 @@ def build_chat_context(
     for artifact in included_artifacts:
         component_messages.append(SystemMessage(content=artifact.rendered_text))
         component_tokens[
-            f"knowledge_{artifact.original_index + 1}"
+            f"{artifact.kind}_{artifact.original_index + 1}"
         ] = artifact.included_tokens
     component_messages.append(SystemMessage(content=_FINAL_DATA_GUARD))
     component_tokens["data_guard"] = data_guard_tokens
@@ -335,7 +351,13 @@ def build_chat_context(
             if component_name in component_tokens
         ],
         "knowledge_retrieved": len(knowledge_items),
-        "knowledge_included": len(included_artifacts),
+        "knowledge_included": sum(
+            artifact.kind == "rag" for artifact in included_artifacts
+        ),
+        "tool_results": len(tool_items),
+        "tool_results_included": sum(
+            artifact.kind == "tool" for artifact in included_artifacts
+        ),
         "artifact_tokens_original": artifact_batch.original_tokens,
         "artifact_tokens_included": artifact_batch.included_tokens,
         "artifact_tokens_saved": artifact_batch.saved_tokens,
@@ -366,6 +388,13 @@ def build_chat_context(
         messages=messages,
         diagnostics=diagnostics,
         included_citation_indexes=[
-            artifact.original_index for artifact in included_artifacts
+            artifact.original_index
+            for artifact in included_artifacts
+            if artifact.kind == "rag"
+        ],
+        included_tool_reference_ids=[
+            artifact.reference_id
+            for artifact in included_artifacts
+            if artifact.kind == "tool"
         ],
     )

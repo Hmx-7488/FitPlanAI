@@ -314,9 +314,18 @@ flowchart LR
 
 验收：所有长期记忆均可追溯、可修改、可遗忘，敏感数据不会静默永久保存。
 
-### 阶段 M6：三模式评测、观测与简历量化
+### 阶段 M6：Tool-Calling Agent、评测与观测
 
-状态：🧭 规划中
+状态：✅ M6A 只读 Tool-Calling 已实现；M6B 生产级评测与观测待开发
+
+M6A 已完成：
+
+- qwen 原生 Tool Calling 在 8 个只读领域工具中自主选择最少调用。
+- 单 LangGraph 编排器负责路由、调用预算、去重、超时、执行和安全降级。
+- `user_id` 由请求上下文绑定，不进入模型 schema；工具不能生成 SQL 或跨用户查询。
+- Tool Artifact 经过 Microcompact 和统一 Context Builder，只有实际进入上下文的结果才标记为回答依据。
+- SSE 与前端增加安全工具台账，展示来源和状态但不暴露 chain-of-thought。
+- 固定 10 场景真实 qwen 路由评测为 10/10、越权调用 0；这是小规模离线集，不是生产指标。
 
 - 构建记忆召回准确率、冲突处理正确率、摘要事实保持率和健康约束遵守率评测。
 - 固定比较 keyword/vector/hybrid 的 Recall@K、MRR、延迟、降级率和 embedding 成本，基于数据调节 RRF 与候选窗口。
@@ -396,6 +405,8 @@ Skill 封装 Agent 内部可复用的领域工作流和提示规范；MCP 解决
 
 > 将长期记忆召回升级为 Hybrid Retrieval：以 SQLite 作为生命周期真值，结合中文关键词与独立 Chroma 向量召回并用 RRF 融合，通过 `content_fingerprint + index_revision` 终检、事务 outbox、幂等重试和 orphan cleanup 解决异步索引陈旧读与最终一致性问题；持久化检索通道、排名、降级原因和实际上下文使用状态，为后续 Recall@K/MRR 与成本评测建立数据基础。
 
+> 将聊天升级为受控 Tool-Calling Agent：基于 qwen 原生工具调用和 LangGraph 编排 8 个只读领域工具，通过服务端身份绑定、Pydantic 严格参数、调用预算、单工具超时与安全降级控制执行边界；工具结果统一进入 token 预算与 Microcompact，前端展示可追溯工具台账但不泄露思维链，并建立固定真实模型路由评测集验证工具选择与越权调用。
+
 不得提前填写或虚构方括号中的指标。
 
 ## 9. 已确认并执行的产品决策
@@ -424,6 +435,7 @@ Skill 封装 Agent 内部可复用的领域工作流和提示规范；MCP 解决
 - [[上下文与记忆-M3-Microcompact实现记录]]
 - [[上下文与记忆-M4-长期记忆实现记录]]
 - [[上下文与记忆-M5-混合检索实现记录]]
+- [[聊天Agent-M6A-Tool-Calling实现记录]]
 - [[数据层接入与Agent升级-技术设计文档]]
 - [[减脂Agent-Agentic-RAG-开发文档]]
 - [[Boss直聘AI岗位调研与FitPlanAI简历项目包装]]
@@ -431,6 +443,7 @@ Skill 封装 Agent 内部可复用的领域工作流和提示规范；MCP 解决
 
 ## 11. 更新日志
 
+- 2026-08-13：完成 M6A 只读 Tool-Calling Agent；新增 8 个请求级领域工具、qwen 原生工具选择、LangGraph 有界执行、Tool Artifact 上下文预算、SSE 工具事件、安全来源台账及固定 10 场景真实模型评测。
 - 2026-08-12：完成 M5.0 长期记忆混合检索；新增独立 Chroma collection、keyword/vector/hybrid 三模式、RRF、SQLite 版本终检、事务 outbox、幂等重试/重建/孤儿清理以及聊天/计划实际使用追踪。M6 调整为三模式质量、延迟与成本评测，不再决定是否采用 hybrid。
 - 2026-08-12：完成 M4 全量校验与独立复核；补齐记忆 API 部署边界鉴权、Prompt 注入防护、时区归一化、并发唯一约束、旧库增量迁移、硬上下文预算及冲突回归测试。后端 242 项测试、前端生产构建与三套离线评测通过。
 - 2026-08-11：完成 M4；新增受治理的跨会话长期记忆、聊天/计划召回、来源与审计、冲突替代、敏感确认和最小记忆管理入口。

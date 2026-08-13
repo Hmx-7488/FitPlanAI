@@ -29,10 +29,12 @@ import type {
   ChatCitation,
   ChatConversation,
   ChatMessage,
+  ChatToolTrace,
   UserMemory,
   UserMemoryType,
 } from '../types'
 import { sanitizeHtml } from '../utils/sanitize'
+import { safeExternalUrl } from '../utils/url'
 
 const userId = Number(localStorage.getItem('userId')) || 0
 const conversations = ref<ChatConversation[]>([])
@@ -81,10 +83,24 @@ function localMessage(role: 'user' | 'assistant', content: string): ChatMessage 
     role,
     content,
     citations: [],
-    context: {},
+    context: role === 'assistant' ? { tool_calls: [] } : {},
     status: role === 'assistant' ? 'pending' : 'completed',
     created_at: new Date().toISOString(),
   }
+}
+
+function toolTracesFor(message: ChatMessage): ChatToolTrace[] {
+  const value = message.context?.tool_calls
+  if (!Array.isArray(value)) return []
+  return value.filter(item => item && typeof item === 'object') as ChatToolTrace[]
+}
+
+function applyToolTrace(message: ChatMessage, trace: ChatToolTrace) {
+  const traces = [...toolTracesFor(message)]
+  const index = traces.findIndex(item => item.call_id === trace.call_id)
+  if (index >= 0) traces[index] = trace
+  else traces.push(trace)
+  message.context = { ...message.context, tool_calls: traces }
 }
 
 async function scrollToBottom() {
@@ -244,6 +260,10 @@ async function sendMessage(content = input.value) {
       {
         onDelta(delta) {
           assistantMessage.content += delta
+          scrollToBottom()
+        },
+        onTool(data) {
+          applyToolTrace(assistantMessage, data as unknown as ChatToolTrace)
           scrollToBottom()
         },
         onCitations(data) {
@@ -477,14 +497,56 @@ onMounted(loadConversations)
                 v-html="formatMessage(message.content)"
               />
               <span v-else class="typing-indicator"><i /><i /><i /></span>
+              <section
+                v-if="toolTracesFor(message).length"
+                class="agent-ledger"
+                aria-label="Agent 数据查询记录"
+                aria-live="polite"
+              >
+                <header>
+                  <BrainCircuit :size="15" />
+                  <span>Agent 数据查询</span>
+                  <small>{{ toolTracesFor(message).length }} 项</small>
+                </header>
+                <div
+                  v-for="trace in toolTracesFor(message)"
+                  :key="trace.call_id"
+                  class="agent-ledger-row"
+                  :class="`agent-ledger-row--${trace.status}`"
+                >
+                  <span class="agent-ledger-mark" aria-hidden="true">
+                    <Check v-if="trace.status === 'completed'" :size="13" />
+                    <ShieldAlert v-else :size="13" />
+                  </span>
+                  <span class="agent-ledger-copy">
+                    <strong>{{ trace.label }}</strong>
+                    <small>{{ trace.summary }}</small>
+                  </span>
+                  <span class="agent-ledger-state">
+                    {{ trace.included_in_answer ? '已用于回答' : trace.status === 'failed' ? '已跳过' : '已查询' }}
+                  </span>
+                  <details v-if="trace.sources?.length" class="agent-sources">
+                    <summary>{{ trace.sources.length }} 个数据来源</summary>
+                    <a
+                      v-for="source in trace.sources"
+                      :key="`${source.source_type}-${source.source_id}`"
+                      :href="safeExternalUrl(source.url)"
+                      :target="safeExternalUrl(source.url) ? '_blank' : undefined"
+                      rel="noopener noreferrer"
+                    >
+                      {{ source.title }}
+                    </a>
+                  </details>
+                </div>
+              </section>
               <details v-if="message.citations?.length" class="citations">
                 <summary><BookOpen :size="15" /> {{ message.citations.length }} 条参考依据</summary>
                 <a
                   v-for="citation in message.citations"
                   :key="citation.chunk_id"
-                  :href="citation.source_url || undefined"
-                  :target="citation.source_url ? '_blank' : undefined"
-                  rel="noreferrer"
+                  :href="safeExternalUrl(citation.source_url)"
+                  :target="safeExternalUrl(citation.source_url) ? '_blank' : undefined"
+                  rel="noopener noreferrer"
                 >
                   <strong>{{ citation.title }}</strong>
                   <span>{{ citation.source_name || citation.category }}</span>
@@ -1037,6 +1099,123 @@ onMounted(loadConversations)
 @keyframes typing {
   0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
   40% { opacity: 1; transform: translateY(-3px); }
+}
+
+.agent-ledger {
+  margin-top: var(--space-3);
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 22%, var(--color-border));
+  border-radius: var(--radius-sm);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--color-accent) 6%, transparent), transparent 52%),
+    var(--color-surface);
+}
+
+.agent-ledger > header {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--color-border-subtle);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.agent-ledger > header small {
+  margin-left: auto;
+  color: var(--color-text-tertiary);
+  font-weight: 500;
+}
+
+.agent-ledger-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+}
+
+.agent-ledger-row + .agent-ledger-row {
+  border-top: 1px dashed var(--color-border-subtle);
+}
+
+.agent-ledger-mark {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+
+.agent-ledger-row--failed .agent-ledger-mark {
+  color: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+}
+
+.agent-ledger-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-ledger-copy strong {
+  color: var(--color-text-primary);
+  font-size: var(--text-sm);
+  font-weight: 620;
+}
+
+.agent-ledger-copy small,
+.agent-ledger-state,
+.agent-sources summary,
+.agent-sources a {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.agent-ledger-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-ledger-state {
+  white-space: nowrap;
+}
+
+.agent-sources {
+  grid-column: 2 / -1;
+}
+
+.agent-sources summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.agent-sources a {
+  display: block;
+  width: fit-content;
+  margin-top: 4px;
+  text-decoration: none;
+}
+
+.agent-sources a:hover {
+  color: var(--color-accent);
+}
+
+@media (max-width: 640px) {
+  .agent-ledger-row {
+    grid-template-columns: 22px minmax(0, 1fr);
+  }
+
+  .agent-ledger-state,
+  .agent-sources {
+    grid-column: 2;
+  }
 }
 
 .citations {
