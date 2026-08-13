@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import desc, select
+from sqlalchemy import and_, desc, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -21,6 +22,56 @@ _generation_slots = asyncio.Semaphore(3)
 _submission_lock = asyncio.Lock()
 _last_submission_at = 0.0
 _MIN_SUBMISSION_INTERVAL_SECONDS = 1.05
+
+
+class RecipeJobLeaseLost(RuntimeError):
+    """Raised inside the provider thread when this worker no longer owns a job."""
+
+
+def _lease_expiry() -> datetime:
+    seconds = get_settings().RECIPE_IMAGE_JOB_LEASE_SECONDS
+    return datetime.utcnow() + timedelta(seconds=seconds)
+
+
+async def _renew_recipe_image_job_lease(
+    job_id: int,
+    lease_owner: str,
+    provider_task_id: str,
+    provider_request_id: str,
+) -> bool:
+    values: dict[str, object] = {
+        "lease_expires_at": _lease_expiry(),
+        "updated_at": datetime.utcnow(),
+    }
+    if provider_task_id:
+        values["provider_task_id"] = provider_task_id
+    if provider_request_id:
+        values["provider_request_id"] = provider_request_id
+    async with async_session() as db:
+        renewed = await db.execute(
+            update(RecipeImageJob)
+            .where(
+                RecipeImageJob.id == job_id,
+                RecipeImageJob.status == "generating",
+                RecipeImageJob.lease_owner == lease_owner,
+            )
+            .values(**values)
+        )
+        await db.commit()
+        return renewed.rowcount == 1
+
+
+def _remove_orphaned_generated_image(url: str) -> None:
+    if not url.startswith("/uploads/recipes/"):
+        return
+    recipe_root = (UPLOAD_DIR / "recipes").resolve()
+    candidate = (recipe_root / Path(url).name).resolve()
+    if candidate.parent != recipe_root:
+        return
+    try:
+        candidate.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Orphaned recipe image cleanup will retry file=%s", candidate.name)
 
 
 async def _wait_for_submission_slot() -> None:
@@ -153,45 +204,116 @@ async def import_legacy_recipe_image_jobs(
 
 
 async def process_recipe_image_job(job_id: int) -> None:
+    lease_owner = uuid.uuid4().hex
     async with async_session() as db:
-        job = await db.get(RecipeImageJob, job_id)
-        if job is None or job.status != "queued":
-            return
-        job.status = "generating"
-        job.error_code = ""
-        job.error_message = ""
-        job.updated_at = datetime.utcnow()
+        claimed_at = datetime.utcnow()
+        claim = await db.execute(
+            update(RecipeImageJob)
+            .where(
+                RecipeImageJob.id == job_id,
+                RecipeImageJob.status == "queued",
+            )
+            .values(
+                status="generating",
+                error_code="",
+                error_message="",
+                lease_owner=lease_owner,
+                lease_expires_at=_lease_expiry(),
+                updated_at=claimed_at,
+            )
+        )
         await db.commit()
+        if claim.rowcount != 1:
+            return
+        job = await db.get(RecipeImageJob, job_id)
+        if job is None:
+            return
         prompt = job.prompt
         recipe_id = job.recipe_id
         recipe_index = job.recipe_index
         provider_task_id = job.provider_task_id
         provider_request_id = job.provider_request_id
 
-    async with _generation_slots:
-        if not provider_task_id:
-            await _wait_for_submission_slot()
-        result = await asyncio.to_thread(
-            generate_recipe_image,
-            prompt,
+    loop = asyncio.get_running_loop()
+
+    def persist_provider_progress(task_id: str, request_id: str) -> None:
+        future = asyncio.run_coroutine_threadsafe(
+            _renew_recipe_image_job_lease(
+                job_id,
+                lease_owner,
+                task_id,
+                request_id,
+            ),
+            loop,
+        )
+        try:
+            renewed = future.result(timeout=30)
+        except Exception as exc:
+            future.cancel()
+            raise RecipeJobLeaseLost("Could not renew recipe image job lease") from exc
+        if not renewed:
+            raise RecipeJobLeaseLost("Recipe image job lease is no longer owned")
+
+    try:
+        async with _generation_slots:
+            if not provider_task_id:
+                await _wait_for_submission_slot()
+            result = await asyncio.to_thread(
+                generate_recipe_image,
+                prompt,
+                recipe_id,
+                recipe_index,
+                provider_task_id,
+                provider_request_id,
+                persist_provider_progress,
+            )
+        if not isinstance(result, dict) or result.get("status") not in {"ready", "failed"}:
+            raise ValueError("Image generator returned an invalid result")
+    except Exception as exc:
+        logger.error(
+            "Unexpected recipe image job failure job_id=%s recipe_id=%s "
+            "index=%s error_type=%s",
+            job_id,
             recipe_id,
             recipe_index,
-            provider_task_id,
-            provider_request_id,
+            type(exc).__name__,
         )
+        result = {
+            "status": "failed",
+            "url": "",
+            "task_id": provider_task_id,
+            "request_id": provider_request_id,
+            "error_code": "INTERNAL_ERROR",
+            "error_message": "图片生成任务异常，请稍后重试",
+        }
 
+    terminal_values: dict[str, object] = {
+        "status": result["status"],
+        "image_url": result.get("url", ""),
+        "error_code": result.get("error_code", ""),
+        "error_message": result.get("error_message", ""),
+        "lease_owner": None,
+        "lease_expires_at": None,
+        "updated_at": datetime.utcnow(),
+    }
+    if result.get("task_id"):
+        terminal_values["provider_task_id"] = result["task_id"]
+    if result.get("request_id"):
+        terminal_values["provider_request_id"] = result["request_id"]
     async with async_session() as db:
-        job = await db.get(RecipeImageJob, job_id)
-        if job is None:
-            return
-        job.status = result["status"]
-        job.image_url = result.get("url", "")
-        job.provider_task_id = result.get("task_id", "")
-        job.provider_request_id = result.get("request_id", "")
-        job.error_code = result.get("error_code", "")
-        job.error_message = result.get("error_message", "")
-        job.updated_at = datetime.utcnow()
+        published = await db.execute(
+            update(RecipeImageJob)
+            .where(
+                RecipeImageJob.id == job_id,
+                RecipeImageJob.status == "generating",
+                RecipeImageJob.lease_owner == lease_owner,
+            )
+            .values(**terminal_values)
+        )
         await db.commit()
+    if published.rowcount != 1:
+        _remove_orphaned_generated_image(str(result.get("url", "")))
+        logger.info("Discarded stale recipe image result job_id=%s", job_id)
 
 
 async def process_recipe_image_jobs(recipe_id: int) -> None:
@@ -201,6 +323,98 @@ async def process_recipe_image_jobs(recipe_id: int) -> None:
     await asyncio.gather(
         *(process_recipe_image_job(job_id) for job_id in queued_ids)
     )
+
+
+async def requeue_stale_recipe_image_jobs(
+    db: AsyncSession,
+    *,
+    stale_before: datetime,
+) -> int:
+    """Atomically requeue only jobs whose persistent lease has expired."""
+    now = datetime.utcnow()
+    recovered = await db.execute(
+        update(RecipeImageJob)
+        .where(
+            RecipeImageJob.status == "generating",
+            or_(
+                RecipeImageJob.lease_expires_at <= now,
+                and_(
+                    RecipeImageJob.lease_expires_at.is_(None),
+                    RecipeImageJob.updated_at <= stale_before,
+                ),
+            ),
+        )
+        .values(
+            status="queued",
+            lease_owner=None,
+            lease_expires_at=None,
+            error_code="",
+            error_message="",
+            updated_at=now,
+        )
+    )
+    await db.commit()
+    return max(0, recovered.rowcount or 0)
+
+
+async def recover_recipe_image_jobs(
+    *,
+    stale_after_seconds: int | None = None,
+    batch_size: int = 100,
+) -> dict[str, int]:
+    """Recover expired work and drain the durable queued task set."""
+    batch_size = max(1, min(batch_size, 500))
+    if stale_after_seconds is None:
+        stale_after_seconds = get_settings().RECIPE_IMAGE_JOB_LEASE_SECONDS
+    stale_after_seconds = max(60, min(stale_after_seconds, 86_400))
+    stale_before = datetime.utcnow() - timedelta(seconds=stale_after_seconds)
+    async with async_session() as db:
+        requeued = await requeue_stale_recipe_image_jobs(
+            db,
+            stale_before=stale_before,
+        )
+        queued_stmt = (
+            select(RecipeImageJob.id)
+            .where(RecipeImageJob.status == "queued")
+            .order_by(RecipeImageJob.updated_at, RecipeImageJob.id)
+        )
+        queued_ids = list((await db.execute(queued_stmt)).scalars().all())
+    for start in range(0, len(queued_ids), batch_size):
+        wave = queued_ids[start:start + batch_size]
+        await asyncio.gather(
+            *(process_recipe_image_job(job_id) for job_id in wave)
+        )
+    return {"requeued": requeued, "processed": len(queued_ids)}
+
+
+async def recipe_image_maintenance_worker(
+    *,
+    stop_event: asyncio.Event | None = None,
+    interval_seconds: float | None = None,
+) -> None:
+    """Continuously recover expired jobs; atomic leases make this multi-worker safe."""
+    interval = (
+        get_settings().RECIPE_IMAGE_MAINTENANCE_INTERVAL_SECONDS
+        if interval_seconds is None
+        else max(0.05, interval_seconds)
+    )
+    while stop_event is None or not stop_event.is_set():
+        try:
+            await recover_recipe_image_jobs()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Recipe image maintenance cycle failed",
+                extra={"error_type": type(exc).__name__},
+            )
+        if stop_event is None:
+            await asyncio.sleep(interval)
+            continue
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+        except TimeoutError:
+            pass
 
 
 async def queue_recipe_image_retry(
@@ -232,6 +446,8 @@ async def queue_recipe_image_retry(
     job.error_message = ""
     job.retry_count += 1
     job.cache_hit = 0
+    job.lease_owner = None
+    job.lease_expires_at = None
     if previous_error_code not in {"NETWORK_ERROR", "POLL_TIMEOUT"}:
         job.provider_task_id = ""
         job.provider_request_id = ""

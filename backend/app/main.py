@@ -11,8 +11,8 @@ from app.api.profile import router as profile_router
 from app.api.plan import router as plan_router
 from app.api.checkin import router as checkin_router
 from app.api.vision import router as vision_router
-from app.api.body import router as body_router
-from app.api.pose import router as pose_router
+from app.api.body import cleanup_body_deletion_quarantine, router as body_router
+from app.api.pose import cleanup_pose_deletion_quarantine, router as pose_router
 from app.api.meal import router as meal_router
 from app.api.dashboard import router as dashboard_router
 from app.api.knowledge import router as knowledge_router
@@ -21,7 +21,9 @@ from app.api.exercises import router as exercises_router
 from app.api.foods import router as foods_router
 from app.services.exercise_service import import_exercises_if_empty
 from app.services.food_service import import_foods_if_empty
-from app.services.memory_index_service import run_memory_index_maintenance
+from app.services.memory_index_service import memory_index_maintenance_worker
+from app.services.conversation_summary_service import chat_background_maintenance_worker
+from app.services.recipe_image_service import recipe_image_maintenance_worker
 
 UPLOAD_DIR = Path(__file__).parent.parent / "data" / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -32,14 +34,23 @@ EXERCISE_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 logger = logging.getLogger(__name__)
 
 
-async def _run_startup_memory_index_maintenance() -> None:
-    try:
-        await run_memory_index_maintenance()
-    except Exception as exc:
-        logger.warning(
-            "Memory index startup maintenance failed",
-            extra={"error_type": type(exc).__name__},
-        )
+async def _cleanup_media_deletion_quarantine() -> None:
+    for label, cleanup in (
+        ("body", cleanup_body_deletion_quarantine),
+        ("pose", cleanup_pose_deletion_quarantine),
+    ):
+        try:
+            removed = await asyncio.to_thread(cleanup)
+            if removed:
+                logger.info("Cleaned %s quarantined %s media files", removed, label)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "%s media quarantine cleanup failed",
+                label.capitalize(),
+                extra={"error_type": type(exc).__name__},
+            )
 
 
 @asynccontextmanager
@@ -62,16 +73,23 @@ async def lifespan(app: FastAPI):
         food_imported = await import_foods_if_empty(session)
         if food_imported:
             logger.info("Food database imported: %d records.", food_imported)
-    memory_index_task = asyncio.create_task(_run_startup_memory_index_maintenance())
+    maintenance_tasks = [
+        asyncio.create_task(memory_index_maintenance_worker()),
+        asyncio.create_task(chat_background_maintenance_worker()),
+        asyncio.create_task(recipe_image_maintenance_worker()),
+        asyncio.create_task(_cleanup_media_deletion_quarantine()),
+    ]
     try:
         yield
     finally:
-        if not memory_index_task.done():
-            memory_index_task.cancel()
-        try:
-            await memory_index_task
-        except asyncio.CancelledError:
-            pass
+        for task in maintenance_tasks:
+            if not task.done():
+                task.cancel()
+        for task in maintenance_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(

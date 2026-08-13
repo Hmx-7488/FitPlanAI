@@ -44,18 +44,17 @@ async def get_profile(db: AsyncSession, user_id: int) -> User | None:
 
 
 async def update_profile(db: AsyncSession, user_id: int, data: dict) -> User | None:
-    """部分更新用户档案，只更新传入的非 None 字段"""
+    """Update exactly the supplied fields, including nullable fields set to None."""
     user = await get_profile(db, user_id)
     if not user:
         return None
 
     list_fields = {"forbidden_foods", "injuries", "allergies", "equipment"}
     for key, value in data.items():
-        if value is not None:
-            if key in list_fields:
-                setattr(user, key, json.dumps(value, ensure_ascii=False))
-            else:
-                setattr(user, key, value)
+        if key in list_fields:
+            setattr(user, key, json.dumps(value, ensure_ascii=False))
+        else:
+            setattr(user, key, value)
 
     await db.commit()
     await db.refresh(user)

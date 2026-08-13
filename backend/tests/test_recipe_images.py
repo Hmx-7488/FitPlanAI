@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import ssl
 import tempfile
@@ -7,6 +8,7 @@ from pathlib import Path
 from urllib.error import URLError
 from unittest.mock import patch
 
+from PIL import Image
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -47,12 +49,21 @@ def sample_recipe(prompt: str = "鸡胸肉西兰花轻食成品") -> RecipeItem:
     )
 
 
+def valid_png() -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", (32, 32), (40, 120, 60)).save(output, format="PNG")
+    return output.getvalue()
+
+
 class ImageProtocolTests(unittest.TestCase):
-    @patch("app.services.image_generation_service.urlopen")
-    def test_download_prefers_beijing_oss_over_accelerate_host(self, urlopen):
+    @patch("app.services.image_generation_service.socket.getaddrinfo")
+    @patch("app.services.image_generation_service._open_download_request")
+    def test_download_prefers_beijing_oss_over_accelerate_host(self, open_request, getaddrinfo):
+        getaddrinfo.return_value = [(2, 1, 6, "", ("8.8.8.8", 443))]
         response = unittest.mock.MagicMock()
-        response.__enter__.return_value.read.return_value = b"image-bytes"
-        urlopen.return_value = response
+        response.__enter__.return_value.geturl.return_value = ""
+        response.__enter__.return_value.read.side_effect = [valid_png(), b""]
+        open_request.return_value = response
 
         with tempfile.TemporaryDirectory() as temp_dir:
             target = Path(temp_dir) / "result.png"
@@ -62,22 +73,26 @@ class ImageProtocolTests(unittest.TestCase):
                 attempts=1,
             )
 
-        requested_host = urlopen.call_args.args[0].host
+        requested_host = open_request.call_args.args[0].host
         self.assertEqual(
             requested_host,
             "dashscope-a717.oss-cn-beijing.aliyuncs.com",
         )
 
     @patch("app.services.image_generation_service.time.sleep")
-    @patch("app.services.image_generation_service.urlopen")
+    @patch("app.services.image_generation_service.socket.getaddrinfo")
+    @patch("app.services.image_generation_service._open_download_request")
     def test_download_falls_back_to_accelerate_host(
         self,
-        urlopen,
+        open_request,
+        getaddrinfo,
         _sleep,
     ):
+        getaddrinfo.return_value = [(2, 1, 6, "", ("8.8.8.8", 443))]
         response = unittest.mock.MagicMock()
-        response.__enter__.return_value.read.return_value = b"image-bytes"
-        urlopen.side_effect = [
+        response.__enter__.return_value.geturl.return_value = ""
+        response.__enter__.return_value.read.side_effect = [valid_png(), b""]
+        open_request.side_effect = [
             URLError(TimeoutError("regional endpoint timeout")),
             response,
         ]
@@ -89,9 +104,9 @@ class ImageProtocolTests(unittest.TestCase):
                 target,
                 attempts=1,
             )
-            self.assertEqual(target.read_bytes(), b"image-bytes")
+            self.assertEqual(target.read_bytes(), valid_png())
 
-        requested_hosts = [call.args[0].host for call in urlopen.call_args_list]
+        requested_hosts = [call.args[0].host for call in open_request.call_args_list]
         self.assertEqual(
             requested_hosts,
             [
@@ -231,6 +246,52 @@ class ImageProtocolTests(unittest.TestCase):
         self.assertEqual(request_json.call_count, 1)
         self.assertIn("/tasks/existing-task", request_json.call_args.args[0])
         sleep.assert_not_called()
+
+    @patch("app.services.image_generation_service._download_file")
+    @patch("app.services.image_generation_service._request_json")
+    def test_provider_progress_is_reported_immediately_after_submission(
+        self,
+        request_json,
+        _download,
+    ):
+        request_json.side_effect = [
+            {
+                "request_id": "create-request",
+                "output": {"task_id": "created-task"},
+            },
+            {
+                "request_id": "poll-request",
+                "output": {
+                    "task_status": "SUCCEEDED",
+                    "choices": [
+                        {
+                            "message": {
+                                "content": [
+                                    {
+                                        "type": "image",
+                                        "image": "https://example.com/result.png",
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                },
+            },
+        ]
+        progress = []
+
+        result = generate_recipe_image(
+            "一份轻食",
+            1,
+            0,
+            progress_callback=lambda task_id, request_id: progress.append(
+                (task_id, request_id)
+            ),
+        )
+
+        self.assertEqual(result["status"], "ready")
+        self.assertGreaterEqual(len(progress), 2)
+        self.assertEqual(progress[0], ("created-task", "create-request"))
 
 
 class RecipeImageJobTests(unittest.TestCase):

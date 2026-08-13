@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import ipaddress
 import logging
+import os
+import re
 import socket
 import ssl
 import time
@@ -10,16 +12,25 @@ import uuid
 from dataclasses import asdict, dataclass
 from http.client import RemoteDisconnected
 from pathlib import Path
+from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse, urlunparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from app.core.config import get_settings
+from app.services.image_utils import image_extension, validate_image
 
 logger = logging.getLogger(__name__)
 
 RECIPES_UPLOAD_DIR = Path(__file__).parent.parent.parent / "data" / "uploads" / "recipes"
 RECIPES_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+MAX_GENERATED_IMAGE_BYTES = 15 * 1024 * 1024
+_TRUSTED_IMAGE_HOST_PATTERNS = (
+    re.compile(r"^(?:[a-z0-9-]+\.)*dashscope\.aliyuncs\.com$"),
+    re.compile(
+        r"^[a-z0-9][a-z0-9.-]*\.oss-(?:accelerate|cn-[a-z0-9-]+)\.aliyuncs\.com$"
+    ),
+)
 
 
 @dataclass
@@ -78,6 +89,14 @@ def _network_error_message(url: str, exc: BaseException) -> str:
             "dashscope.aliyuncs.com 配置为稳定可用的代理规则后重试"
         )
     return message
+
+
+def _public_image_error_message(code: str) -> str:
+    if code in {"NETWORK_ERROR", "POLL_TIMEOUT"}:
+        return "图片生成服务网络繁忙，请稍后重试"
+    if "Quota" in code or "QUOTA" in code.upper():
+        return "图片生成服务额度暂时不可用，请稍后重试"
+    return "图片生成失败，请稍后重试"
 
 
 def _request_json(
@@ -157,16 +176,41 @@ def _download_file(
 
     last_error: BaseException | None = None
     for candidate in candidates:
+        _validate_provider_image_url(candidate)
         request = Request(candidate, headers={"User-Agent": "SlimAgent/1.0"})
         hostname = urlparse(candidate).hostname
         for attempt in range(1, max(1, attempts) + 1):
             try:
-                with urlopen(request, timeout=timeout) as response:
-                    path.write_bytes(response.read())
+                with _open_download_request(request, timeout) as response:
+                    final_url = response.geturl()
+                    if isinstance(final_url, str) and final_url:
+                        _validate_provider_image_url(final_url)
+                    chunks: list[bytes] = []
+                    downloaded = 0
+                    while True:
+                        chunk = response.read(64 * 1024)
+                        if not chunk:
+                            break
+                        downloaded += len(chunk)
+                        if downloaded > MAX_GENERATED_IMAGE_BYTES:
+                            raise ValueError("Generated image response is too large")
+                        chunks.append(chunk)
+                    content = b"".join(chunks)
+                    mime_type, _, _ = validate_image(content)
+                    if image_extension(mime_type) != path.suffix.lower():
+                        raise ValueError("Generated image type does not match destination")
+
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    temporary_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+                    try:
+                        temporary_path.write_bytes(content)
+                        os.replace(temporary_path, path)
+                    finally:
+                        temporary_path.unlink(missing_ok=True)
                     logger.info(
                         "Recipe image downloaded host=%s bytes=%s",
                         hostname,
-                        path.stat().st_size,
+                        downloaded,
                     )
                     return
             except (
@@ -191,6 +235,51 @@ def _download_file(
     if last_error is not None:
         raise last_error
     raise RuntimeError("No recipe image download URL available")
+
+
+def _is_trusted_provider_image_host(hostname: str) -> bool:
+    normalized = hostname.rstrip(".").lower()
+    return any(pattern.fullmatch(normalized) for pattern in _TRUSTED_IMAGE_HOST_PATTERNS)
+
+
+def _validate_provider_image_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme.lower() != "https":
+        raise ValueError("Provider image URL must use HTTPS")
+    if parsed.username or parsed.password or parsed.port not in (None, 443):
+        raise ValueError("Provider image URL is not trusted")
+    hostname = (parsed.hostname or "").rstrip(".").lower()
+    if not hostname or not _is_trusted_provider_image_host(hostname):
+        raise ValueError("Provider image URL host is not trusted")
+    try:
+        addresses = {
+            item[4][0]
+            for item in socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
+        }
+    except OSError as exc:
+        raise ValueError("Unable to resolve provider image host") from exc
+    if not addresses:
+        raise ValueError("Unable to resolve provider image host")
+    try:
+        if any(not ipaddress.ip_address(address).is_global for address in addresses):
+            raise ValueError("Provider image host must resolve only to public addresses")
+    except ValueError as exc:
+        if "public addresses" in str(exc):
+            raise
+        raise ValueError("Provider image host resolved to an invalid address") from exc
+
+
+class _SafeImageRedirectHandler(HTTPRedirectHandler):
+    max_redirections = 3
+    max_repeats = 2
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_provider_image_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open_download_request(request: Request, timeout: int):
+    return build_opener(_SafeImageRedirectHandler()).open(request, timeout=timeout)
 
 
 def _wan26_payload(prompt: str, model: str) -> dict:
@@ -254,6 +343,7 @@ def generate_recipe_image(
     index: int,
     existing_task_id: str = "",
     existing_request_id: str = "",
+    progress_callback: Callable[[str, str], None] | None = None,
 ) -> dict:
     settings = get_settings()
     if not settings.IMAGE_GENERATION_ENABLED:
@@ -315,6 +405,8 @@ def generate_recipe_image(
                     code=created.get("code") or "MISSING_TASK_ID",
                     request_id=request_id,
                 )
+            if progress_callback is not None:
+                progress_callback(task_id, request_id)
         else:
             logger.info(
                 "Resuming recipe image task recipe_id=%s index=%s task_id=%s request_id=%s",
@@ -323,6 +415,8 @@ def generate_recipe_image(
                 task_id,
                 request_id,
             )
+            if progress_callback is not None:
+                progress_callback(task_id, request_id)
 
         task_url = f"{settings.IMAGE_BASE_URL.rstrip('/')}/tasks/{task_id}"
         task = {}
@@ -361,6 +455,8 @@ def generate_recipe_image(
                     ) from exc
                 continue
             request_id = task.get("request_id", request_id)
+            if progress_callback is not None:
+                progress_callback(task_id, request_id)
             output = task.get("output") or {}
             status = output.get("task_status")
             logger.info(
@@ -435,30 +531,31 @@ def generate_recipe_image(
     except DashScopeImageError as exc:
         logger.error(
             "Recipe image generation failed recipe_id=%s index=%s model=%s task_id=%s "
-            "request_id=%s code=%s message=%s",
+            "request_id=%s code=%s",
             recipe_id,
             index,
             model,
             exc.task_id or task_id,
             exc.request_id or request_id,
             exc.code,
-            str(exc),
         )
         return ImageGenerationResult(
             status="failed",
             task_id=exc.task_id or task_id,
             request_id=exc.request_id or request_id,
             error_code=exc.code or "GENERATION_FAILED",
-            error_message=str(exc)[:500],
+            error_message=_public_image_error_message(exc.code),
         ).to_dict()
-    except Exception:
-        logger.exception(
-            "Unexpected recipe image failure recipe_id=%s index=%s model=%s task_id=%s request_id=%s",
+    except Exception as exc:
+        logger.error(
+            "Unexpected recipe image failure recipe_id=%s index=%s model=%s "
+            "task_id=%s request_id=%s error_type=%s",
             recipe_id,
             index,
             model,
             task_id,
             request_id,
+            type(exc).__name__,
         )
         return ImageGenerationResult(
             status="failed",

@@ -112,5 +112,22 @@
         "sensitivity": "normal"
       }
     ]
+  },
+  {
+    "id": "simulated_semantic_vector_gain",
+    "query": "锻炼时段",
+    "limit": 5,
+    "expected_ids": [40],
+    "simulated_vector_ids": [40],
+    "memories": [
+      {
+        "id": 40,
+        "memory_type": "habit",
+        "memory_key": "routine.dawn",
+        "content_text": "用户习惯清晨六点运动",
+        "confirmation_status": "confirmed",
+        "sensitivity": "normal"
+      }
+    ]
   }
 ]

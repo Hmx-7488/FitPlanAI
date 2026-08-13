@@ -1,4 +1,5 @@
 """Knowledge management API endpoints."""
+import asyncio
 import hmac
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -47,14 +48,14 @@ def require_admin_key(x_admin_key: str = Header(default="")):
 async def search_knowledge(query: SearchQuery):
     """Search the knowledge base with hybrid retrieval."""
     retriever = get_retriever()
-    return retriever.search(query)
+    return await asyncio.to_thread(retriever.search, query)
 
 
 @router.get("/status")
 async def get_status():
     """Get current knowledge index status."""
     retriever = get_retriever()
-    return retriever.get_status()
+    return await asyncio.to_thread(retriever.get_status)
 
 
 # ── 管理接口（需鉴权）──
@@ -64,7 +65,7 @@ async def get_status():
 async def rebuild_index():
     """Rebuild the knowledge index (vector + keyword). Requires admin key."""
     retriever = get_retriever()
-    result = retriever.rebuild()
+    result = await asyncio.to_thread(retriever.rebuild)
     if "error" in result:
         raise HTTPException(status_code=500, detail=result["error"])
     return {"status": "ok", **result}
@@ -77,7 +78,7 @@ async def list_documents():
     from app.rag.indexer import load_all_documents
 
     docs_dir = Path(__file__).parent.parent.parent / "data" / "knowledge_docs"
-    docs, _, _ = load_all_documents(docs_dir)
+    docs, _, _ = await asyncio.to_thread(load_all_documents, docs_dir)
     return {
         "documents": [
             {
@@ -99,5 +100,5 @@ async def evaluate_retrieval():
     """Run the RAG evaluation suite. Requires admin key."""
     from app.rag.evaluate import run_evaluation
 
-    return run_evaluation()
+    return await asyncio.to_thread(run_evaluation)
 

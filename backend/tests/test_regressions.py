@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import os
 import tempfile
@@ -7,13 +8,14 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch, MagicMock
 
 from fastapi.testclient import TestClient
+from PIL import Image
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.config import _configure_process_proxy, _proxy_url
 from app.core.database import Base, get_db
 from app.main import app
-from app.models.user import MealLog, User
+from app.models.user import Checkin, MealLog, User
 from app.api.body import _coerce_body_fat_range
 from app.api.dashboard import _compute_streak
 from app.services.vision_service import _extract_json_array
@@ -54,9 +56,15 @@ def png_header(width: int, height: int) -> bytes:
     return b"\x89PNG\r\n\x1a\n" + (b"\x00" * 8) + width.to_bytes(4, "big") + height.to_bytes(4, "big")
 
 
+def png_image(width: int, height: int) -> bytes:
+    output = io.BytesIO()
+    Image.new("RGB", (width, height), (20, 80, 120)).save(output, format="PNG")
+    return output.getvalue()
+
+
 class ImageValidationTests(unittest.TestCase):
     def test_detects_content_instead_of_filename(self):
-        image = png_header(32, 24)
+        image = png_image(32, 24)
         mime_type, width, height = validate_image(image)
 
         self.assertEqual(mime_type, "image/png")
@@ -68,8 +76,10 @@ class ImageValidationTests(unittest.TestCase):
         self.assertEqual(detect_image_mime(b"not an image"), "application/octet-stream")
         with self.assertRaisesRegex(ValueError, "invalid image"):
             validate_image(b"not an image")
+        with self.assertRaisesRegex(ValueError, "invalid image"):
+            validate_image(png_header(32, 24))
         with self.assertRaisesRegex(ValueError, "10x10"):
-            validate_image(png_header(9, 20))
+            validate_image(png_image(9, 20))
 
     def test_reads_lossy_webp_dimensions(self):
         image = bytearray(30)
@@ -1146,7 +1156,7 @@ class MealRecognitionFailureTests(unittest.TestCase):
 
     @staticmethod
     def _png() -> bytes:
-        return png_header(32, 24)
+        return png_image(32, 24)
 
     def _meal_count(self) -> int:
         async def count():
@@ -1397,10 +1407,12 @@ class AdjustCaloriesEndpointTests(unittest.TestCase):
                     macros_json='{"protein_g": 120, "carbs_g": 200, "fat_g": 56}',
                     meal_plan="m", workout_plan="w",
                 ))
+                session.add(Checkin(id=1, user_id=1, date="2026-08-10"))
                 session.add(User(
                     id=2, gender="female", age=28, height=165, weight=60,
                     target_weight=55,
                 ))
+                session.add(Checkin(id=2, user_id=2, date="2026-08-10"))
                 session.add(User(
                     id=3, gender="male", age=30, height=175, weight=70,
                     target_weight=65, diet_preference="low_carb",
@@ -1411,6 +1423,7 @@ class AdjustCaloriesEndpointTests(unittest.TestCase):
                     macros_json='{"protein_g": 112, "carbs_g": 100, "fat_g": 124}',
                     meal_plan="m", workout_plan="w",
                 ))
+                session.add(Checkin(id=3, user_id=3, date="2026-08-10"))
                 await session.commit()
 
         asyncio.run(prepare())
@@ -1425,7 +1438,13 @@ class AdjustCaloriesEndpointTests(unittest.TestCase):
     def test_adjust_updates_target_and_macros(self):
         response = self.client.post(
             "/api/plan/adjust-calories",
-            json={"user_id": 1, "daily_calorie_target": 1800},
+            json={
+                "user_id": 1,
+                "plan_id": 1,
+                "source_checkin_id": 1,
+                "base_daily_calorie_target": 2000,
+                "daily_calorie_target": 1800,
+            },
         )
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -1438,14 +1457,26 @@ class AdjustCaloriesEndpointTests(unittest.TestCase):
     def test_adjust_without_plan_returns_404(self):
         response = self.client.post(
             "/api/plan/adjust-calories",
-            json={"user_id": 2, "daily_calorie_target": 1800},
+            json={
+                "user_id": 2,
+                "plan_id": 999,
+                "source_checkin_id": 2,
+                "base_daily_calorie_target": 1800,
+                "daily_calorie_target": 1800,
+            },
         )
         self.assertEqual(response.status_code, 404)
 
     def test_adjust_preserves_low_carb_macro_preference(self):
         response = self.client.post(
             "/api/plan/adjust-calories",
-            json={"user_id": 3, "daily_calorie_target": 1800},
+            json={
+                "user_id": 3,
+                "plan_id": 2,
+                "source_checkin_id": 3,
+                "base_daily_calorie_target": 2000,
+                "daily_calorie_target": 1800,
+            },
         )
 
         self.assertEqual(response.status_code, 200)
@@ -1460,7 +1491,13 @@ class AdjustCaloriesEndpointTests(unittest.TestCase):
     def test_adjust_out_of_range_rejected(self):
         response = self.client.post(
             "/api/plan/adjust-calories",
-            json={"user_id": 1, "daily_calorie_target": 500},
+            json={
+                "user_id": 1,
+                "plan_id": 1,
+                "source_checkin_id": 1,
+                "base_daily_calorie_target": 2000,
+                "daily_calorie_target": 500,
+            },
         )
         self.assertEqual(response.status_code, 422)
 

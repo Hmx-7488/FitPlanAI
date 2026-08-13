@@ -8,6 +8,21 @@ from app.models.user import Food
 
 router = APIRouter()
 
+ALLOWED_DIET_TAGS = frozenset({
+    "antioxidant",
+    "healthy_fat",
+    "high_fiber",
+    "high_protein",
+    "high_vitamin_c",
+    "low_calorie",
+    "low_carb",
+    "low_fat",
+    "low_sodium",
+    "low_sugar",
+    "omega3",
+    "vegetarian",
+})
+
 
 def _to_dict(food: Food) -> dict:
     """Serialize food record for frontend."""
@@ -49,6 +64,15 @@ async def search_foods(
             | (Food.aliases.ilike(f"%{q}%"))
             | (Food.common_dishes.ilike(f"%{q}%"))
         )
+    if diet_tags:
+        tags = [tag.strip() for tag in diet_tags.split(",") if tag.strip()]
+        if not tags or len(tags) > len(ALLOWED_DIET_TAGS) or any(
+            tag not in ALLOWED_DIET_TAGS for tag in tags
+        ):
+            raise HTTPException(status_code=400, detail="Invalid diet_tags filter")
+        for tag in tags:
+            # Stored as JSON text. Quoting the value avoids substring matches.
+            stmt = stmt.where(Food.diet_tags.ilike(f'%"{tag}"%'))
 
     count_stmt = select(func.count()).select_from(stmt.order_by(None).subquery())
     total = (await db.execute(count_stmt)).scalar() or 0

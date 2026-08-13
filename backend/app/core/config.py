@@ -114,6 +114,18 @@ class Settings(BaseSettings):
     MEMORY_INDEX_BATCH_SIZE: int = 20
     MEMORY_INDEX_MAX_ATTEMPTS: int = 5
     MEMORY_INDEX_RETRY_BASE_SECONDS: int = 5
+    MEMORY_INDEX_MAINTENANCE_INTERVAL_SECONDS: float = 5.0
+    RECIPE_IMAGE_JOB_LEASE_SECONDS: int = 300
+    RECIPE_IMAGE_MAINTENANCE_INTERVAL_SECONDS: float = 30.0
+    # 仅在当前 collection 已完整覆盖 SQL 活跃记忆后清理旧版本，避免模型
+    # 或 index_version 切换后继续保留已经删除的敏感向量。
+    MEMORY_CLEANUP_OBSOLETE_COLLECTIONS: bool = True
+    CHAT_MEMORY_EXTRACTION_SCAN_LIMIT: int = 100
+    CHAT_MEMORY_EXTRACTION_MAX_ATTEMPTS: int = 5
+    CHAT_MEMORY_EXTRACTION_RETRY_BASE_SECONDS: int = 30
+    CHAT_SUMMARY_SCAN_LIMIT: int = 50
+    CHAT_SUMMARY_PENDING_LEASE_SECONDS: int = 300
+    CHAT_BACKGROUND_MAINTENANCE_INTERVAL_SECONDS: float = 30.0
     # 非 development 环境下，记忆 API 必须由可信反向代理注入该密钥。
     MEMORY_API_ACCESS_KEY: str = ""
     # 允许的前端来源，逗号分隔；默认仅本地开发端口
@@ -208,6 +220,32 @@ class Settings(BaseSettings):
             raise ValueError("MEMORY_INDEX_MAX_ATTEMPTS must be positive")
         if self.MEMORY_INDEX_RETRY_BASE_SECONDS <= 0:
             raise ValueError("MEMORY_INDEX_RETRY_BASE_SECONDS must be positive")
+        if self.MEMORY_INDEX_MAINTENANCE_INTERVAL_SECONDS <= 0:
+            raise ValueError(
+                "MEMORY_INDEX_MAINTENANCE_INTERVAL_SECONDS must be positive"
+            )
+        if self.RECIPE_IMAGE_JOB_LEASE_SECONDS < 60:
+            raise ValueError("RECIPE_IMAGE_JOB_LEASE_SECONDS must be at least 60")
+        if self.RECIPE_IMAGE_MAINTENANCE_INTERVAL_SECONDS <= 0:
+            raise ValueError(
+                "RECIPE_IMAGE_MAINTENANCE_INTERVAL_SECONDS must be positive"
+            )
+        if self.CHAT_MEMORY_EXTRACTION_SCAN_LIMIT <= 0:
+            raise ValueError("CHAT_MEMORY_EXTRACTION_SCAN_LIMIT must be positive")
+        if self.CHAT_MEMORY_EXTRACTION_MAX_ATTEMPTS <= 0:
+            raise ValueError("CHAT_MEMORY_EXTRACTION_MAX_ATTEMPTS must be positive")
+        if self.CHAT_MEMORY_EXTRACTION_RETRY_BASE_SECONDS <= 0:
+            raise ValueError(
+                "CHAT_MEMORY_EXTRACTION_RETRY_BASE_SECONDS must be positive"
+            )
+        if self.CHAT_SUMMARY_SCAN_LIMIT <= 0:
+            raise ValueError("CHAT_SUMMARY_SCAN_LIMIT must be positive")
+        if self.CHAT_SUMMARY_PENDING_LEASE_SECONDS <= 0:
+            raise ValueError("CHAT_SUMMARY_PENDING_LEASE_SECONDS must be positive")
+        if self.CHAT_BACKGROUND_MAINTENANCE_INTERVAL_SECONDS <= 0:
+            raise ValueError(
+                "CHAT_BACKGROUND_MAINTENANCE_INTERVAL_SECONDS must be positive"
+            )
         return self
 
 

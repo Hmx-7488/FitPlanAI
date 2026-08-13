@@ -12,7 +12,7 @@ from app.rag.models import (
 )
 from app.rag.indexer import load_all_documents
 from app.rag.keyword_index import KeywordIndex
-from app.rag.vectorstore import get_vectorstore_manager
+from app.rag.vectorstore import KnowledgeVectorUnavailable, get_vectorstore_manager
 
 logger = logging.getLogger(__name__)
 _DATA_DIR = Path(__file__).parent.parent.parent / "data" / "knowledge_docs"
@@ -24,6 +24,7 @@ _SCORE_FLOOR = 0.30
 _SCORE_CEILING = 0.55
 # 查询关键 token 在结果中的覆盖率低于此值 → 证据不足（仅在灰色区间生效）
 _COVERAGE_THRESHOLD = 0.25
+_RRF_K = 60
 # 训练水平兼容性映射：查询级别 → 可接受的 chunk 级别集合
 _LEVEL_COMPAT: dict[str, set[str]] = {
     "general": {"general"},
@@ -92,6 +93,10 @@ class HybridRetriever:
     def __init__(self):
         self._kw: KeywordIndex | None = None
         self._ok = False
+        self._last_search_diagnostics: dict[str, object] = {
+            "vector_state": "not_queried",
+            "degraded": False,
+        }
 
     def initialize(self):
         if self._ok:
@@ -109,7 +114,20 @@ class HybridRetriever:
         self.initialize()
         fdict = self._build_chroma_filter(q)
         vs = get_vectorstore_manager()
-        vr = vs.similarity_search(q.query, k=q.top_k * 2, filter_dict=fdict)
+        vector_state = "ok"
+        degraded = False
+        try:
+            vr = vs.similarity_search(q.query, k=q.top_k * 2, filter_dict=fdict)
+            if not vr:
+                vector_state = "empty"
+        except KnowledgeVectorUnavailable as exc:
+            vr = []
+            vector_state = "unavailable"
+            degraded = True
+            logger.warning(
+                "Knowledge retrieval degraded to keyword channel",
+                extra={"error_type": type(exc.__cause__ or exc).__name__},
+            )
 
         kr = []
         if self._kw:
@@ -123,7 +141,9 @@ class HybridRetriever:
         rr = self._filter_and_rerank(mg, q)
 
         out = []
-        # 用 rerank 前的原始合并分数做证据评估（避免 reranking bonus 虚高）
+        # Fusion scores are pure rank-derived RRF values. Evidence sufficiency
+        # separately uses lexical coverage so an unrelated channel rank cannot
+        # be mistaken for semantic confidence.
         raw_scores = [bs for _, bs, _ in mg.values()]
         raw_top = max(raw_scores) if raw_scores else 0.0
 
@@ -145,6 +165,12 @@ class HybridRetriever:
             ))
 
         ins = self._assess_evidence(q.query, out, raw_top_score=raw_top)
+        self._last_search_diagnostics = {
+            "vector_state": vector_state,
+            "degraded": degraded,
+            "vector_candidates": len(vr),
+            "keyword_candidates": len(kr),
+        }
         return SearchResult(
             query=q.query,
             documents=out if not ins else [],
@@ -164,20 +190,36 @@ class HybridRetriever:
     # ── 合并去重 ──
 
     def _merge(self, vr, kr):
-        m: dict = {}
-        for ch, sc in vr:
-            if ch.chunk_id in m:
-                ec, es, _ = m[ch.chunk_id]
-                m[ch.chunk_id] = (ec, max(es, sc), "hybrid")
-            else:
-                m[ch.chunk_id] = (ch, sc, "vector")
-        for ch, sc in kr:
-            if ch.chunk_id in m:
-                ec, es, _ = m[ch.chunk_id]
-                m[ch.chunk_id] = (ec, max(es, sc), "hybrid")
-            else:
-                m[ch.chunk_id] = (ch, sc, "keyword")
-        return m
+        # Reciprocal Rank Fusion compares ranks rather than raw Chroma relevance
+        # and BM25 scores, whose numeric scales are unrelated. Normalize by the
+        # theoretical two-channel maximum so downstream evidence scores stay in
+        # the established 0..1 contract.
+        entries: dict[str, dict[str, object]] = {}
+        for channel, results in (("vector", vr), ("keyword", kr)):
+            for rank, (chunk, _raw_score) in enumerate(results, start=1):
+                item = entries.setdefault(
+                    chunk.chunk_id,
+                    {"chunk": chunk, "channels": set(), "rrf": 0.0},
+                )
+                channels = item["channels"]
+                assert isinstance(channels, set)
+                if channel in channels:
+                    continue
+                channels.add(channel)
+                item["rrf"] = float(item["rrf"]) + 1 / (_RRF_K + rank)
+
+        maximum = 2 / (_RRF_K + 1)
+        merged: dict[str, tuple[KnowledgeChunk, float, str]] = {}
+        for chunk_id, item in entries.items():
+            channels = item["channels"]
+            assert isinstance(channels, set)
+            method = "hybrid" if len(channels) > 1 else next(iter(channels))
+            merged[chunk_id] = (
+                item["chunk"],
+                min(1.0, float(item["rrf"]) / maximum),
+                method,
+            )
+        return merged
 
     # ── 过滤 + 重排序 ──
 
@@ -312,6 +354,39 @@ class HybridRetriever:
         """
         if not docs:
             return True
+        normalized_query = re.sub(r"\s+", "", query.lower())
+        categories = {document.category for document in docs}
+        has_risk_evidence = "risk_rules" in categories
+        safety_query = (
+            any(
+                cue in normalized_query
+                for cue in (
+                    "受伤", "伤病", "疼痛", "膝盖", "膝关节", "腰椎",
+                    "肩关节", "过敏", "不耐受",
+                )
+            )
+            or bool(
+                re.search(
+                    r"(?:每天|每日|一天)?(?:只吃|仅吃|摄入)?.{0,3}[1-8]\d{2}(?:大卡|千卡|kcal)",
+                    normalized_query,
+                )
+            )
+        )
+        if safety_query and has_risk_evidence:
+            return False
+        q_tokens = _extract_query_tokens(query)
+        if q_tokens:
+            combined_text = " ".join(
+                document.title + " " + document.content[:300]
+                for document in docs
+            ).lower()
+            hits = sum(1 for token in q_tokens if token in combined_text)
+            coverage = hits / len(q_tokens)
+            # Partial overlap with poor coverage (for example a query that only
+            # shares “减脂” while asking about unsupported quantum mechanics)
+            # remains insufficient even if both channels rank it first.
+            if 0 < hits and coverage < _COVERAGE_THRESHOLD:
+                return True
         # 优先使用原始合并分数；向后兼容时回退到 reranked score
         top_score = raw_top_score if raw_top_score > 0 else docs[0].score
         if top_score < _SCORE_FLOOR:
@@ -319,12 +394,10 @@ class HybridRetriever:
         if top_score >= _SCORE_CEILING:
             return False
         # 灰色区间：用覆盖率辅助判定
-        q_tokens = _extract_query_tokens(query)
         if not q_tokens:
             return False
-        combined_text = " ".join(d.title + " " + d.content[:300] for d in docs).lower()
-        hits = sum(1 for t in q_tokens if t in combined_text)
-        coverage = hits / len(q_tokens)
+        if hits == 0:
+            return True
         if coverage < _COVERAGE_THRESHOLD:
             return True
         return False
@@ -351,6 +424,7 @@ class HybridRetriever:
                 "initialized": self._ok,
                 "chunks": len(self._kw._chunks) if self._kw else 0,
             },
+            "last_search": dict(self._last_search_diagnostics),
         }
 
 

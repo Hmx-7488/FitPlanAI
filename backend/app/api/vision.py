@@ -53,8 +53,8 @@ async def upload_and_recognize(
         return result
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"识别失败: {str(e)}")
+    except Exception:
+        raise HTTPException(status_code=500, detail="食材识别服务暂时不可用")
 
 
 @router.post("/confirm", response_model=ConfirmResponse)
@@ -67,8 +67,8 @@ async def confirm_user_ingredients(
         return await confirm_ingredients(db, request)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"确认失败: {str(e)}")
+    except Exception:
+        raise HTTPException(status_code=500, detail="食材确认服务暂时不可用")
 
 
 @router.post("/recipes", response_model=RecipeResponse)
@@ -84,8 +84,8 @@ async def generate_user_recipes(
         return response
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"生成菜谱失败: {str(e)}")
+    except Exception:
+        raise HTTPException(status_code=500, detail="菜谱生成服务暂时不可用")
 
 
 @router.get("/recipes/latest/{user_id}")

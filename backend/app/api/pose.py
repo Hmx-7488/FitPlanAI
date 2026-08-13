@@ -1,4 +1,5 @@
 """AI 动作分析 API（Vision Model 驱动，带 Mock 降级）"""
+import asyncio
 import json
 import logging
 import uuid
@@ -7,8 +8,8 @@ from typing import List
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
-from app.models.user import User
-from app.services.image_utils import image_extension, validate_image
+from app.models.user import PoseAnalysisRecord, User
+from app.services.image_utils import detect_video_type, image_extension, validate_image
 from app.services.pose_metrics_service import compute_pose_metrics
 
 router = APIRouter()
@@ -16,9 +17,104 @@ logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = Path(__file__).parent.parent.parent / "data" / "uploads" / "pose"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+QUARANTINE_DIR = UPLOAD_DIR.parent.parent / ".media_deletion_quarantine" / "pose"
 
-VIDEO_MIME_TYPES = {"video/mp4", "video/webm", "video/quicktime", "video/x-msvideo"}
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_VIDEO_BYTES = 80 * 1024 * 1024
+
+
+def _unlink_media_file(path: Path) -> None:
+    path.unlink(missing_ok=True)
+
+
+def _move_media_file(source: Path, target: Path) -> None:
+    source.replace(target)
+
+
+def _stage_media_deletion(paths: list[Path]) -> tuple[Path, list[tuple[Path, Path]]]:
+    operation_dir = QUARANTINE_DIR / "pending" / uuid.uuid4().hex
+    operation_dir.mkdir(parents=True, exist_ok=False)
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for source in paths:
+            if not source.exists():
+                continue
+            target = operation_dir / source.name
+            _move_media_file(source, target)
+            staged.append((source, target))
+    except OSError:
+        for source, target in reversed(staged):
+            try:
+                _move_media_file(target, source)
+            except OSError:
+                logger.critical("Failed to restore staged pose media file=%s", source.name)
+        try:
+            operation_dir.rmdir()
+        except OSError:
+            pass
+        raise
+    return operation_dir, staged
+
+
+def _restore_staged_media(staged: list[tuple[Path, Path]]) -> None:
+    for source, target in reversed(staged):
+        if target.exists():
+            _move_media_file(target, source)
+
+
+def _promote_staged_media(
+    operation_dir: Path,
+    staged: list[tuple[Path, Path]],
+) -> tuple[Path, list[tuple[Path, Path]]]:
+    committed_root = QUARANTINE_DIR / "committed"
+    committed_root.mkdir(parents=True, exist_ok=True)
+    committed_dir = committed_root / operation_dir.name
+    _move_media_file(operation_dir, committed_dir)
+    return committed_dir, [
+        (source, committed_dir / target.name) for source, target in staged
+    ]
+
+
+def _cleanup_staged_media(
+    operation_dir: Path,
+    staged: list[tuple[Path, Path]],
+) -> bool:
+    pending = False
+    for _, target in staged:
+        try:
+            _unlink_media_file(target)
+        except OSError:
+            pending = True
+            logger.exception("Quarantined pose media cleanup failed file=%s", target.name)
+    if not pending:
+        try:
+            operation_dir.rmdir()
+        except OSError:
+            pass
+    return pending
+
+
+def cleanup_pose_deletion_quarantine() -> int:
+    """Retry removal of media already detached from committed deleted records."""
+    committed_root = QUARANTINE_DIR / "committed"
+    if not committed_root.exists():
+        return 0
+    removed = 0
+    for operation_dir in committed_root.iterdir():
+        if not operation_dir.is_dir():
+            continue
+        for target in operation_dir.iterdir():
+            if target.is_file():
+                try:
+                    _unlink_media_file(target)
+                    removed += 1
+                except OSError:
+                    logger.warning("Pose quarantine cleanup will retry file=%s", target.name)
+        try:
+            operation_dir.rmdir()
+        except OSError:
+            pass
+    return removed
 
 # 支持的动作列表
 MOVEMENT_NAMES = {
@@ -224,9 +320,17 @@ def _normalize_pose_result(parsed: dict, movement_cn: str, is_video: bool) -> di
     }
 
 
+def _user_injuries(user) -> list[str]:
+    try:
+        value = json.loads(user.injuries) if user.injuries else []
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return [str(item)[:100] for item in value[:20]] if isinstance(value, list) else []
+
+
 def _build_risk_warnings(user, movement_key: str) -> list[str]:
     """根据用户伤病生成风险提示"""
-    injuries = json.loads(user.injuries) if user.injuries else []
+    injuries = _user_injuries(user)
     warnings = []
     if not injuries:
         return warnings
@@ -251,7 +355,7 @@ async def _analyze_pose_frames(
     is_video: bool,
     quantitative: dict | None = None,
 ) -> dict | None:
-    injuries = json.loads(user.injuries) if user.injuries else []
+    injuries = _user_injuries(user)
     injury_ctx = f"用户伤病史：{'、'.join(injuries)}。请把相关关节风险纳入建议。" if injuries else "用户未填写明确伤病史。"
     media_desc = "按时间顺序排列的训练动作视频关键帧" if is_video else "训练动作照片"
     output_example = (
@@ -302,7 +406,7 @@ async def _analyze_pose_frames(
             })
 
         llm = get_vision_llm(max_tokens=900)
-        response = llm.invoke([HumanMessage(content=content)])
+        response = await asyncio.to_thread(llm.invoke, [HumanMessage(content=content)])
         raw = response.content.strip()
         logger.info(
             "Vision pose response received: media=%s chars=%s",
@@ -379,6 +483,43 @@ def _parse_pose_data(raw: str | None, movement_key: str) -> dict | None:
     return compute_pose_metrics(payload, movement_key)
 
 
+def _remove_pose_files(paths: list[Path]) -> None:
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.exception("Failed to roll back pose media file: %s", path.name)
+
+
+async def _persist_pose_media(
+    db: AsyncSession,
+    user_id: int,
+    media_urls: list[str],
+) -> str:
+    record_id = uuid.uuid4().hex
+    db.add(PoseAnalysisRecord(
+        id=record_id,
+        user_id=user_id,
+        media_paths_json=json.dumps(media_urls, ensure_ascii=False),
+    ))
+    await db.commit()
+    return f"pose_{record_id}"
+
+
+async def _persist_pose_media_or_rollback(
+    db: AsyncSession,
+    user_id: int,
+    media_urls: list[str],
+    saved_paths: list[Path],
+) -> str:
+    try:
+        return await _persist_pose_media(db, user_id, media_urls)
+    except Exception:
+        await db.rollback()
+        _remove_pose_files(saved_paths)
+        raise
+
+
 @router.post("/analyze")
 async def analyze_pose(
     user_id: int = Form(...),
@@ -399,18 +540,25 @@ async def analyze_pose(
         mime_type, _, _ = validate_image(content)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    saved_name = f"{uuid.uuid4().hex}{image_extension(mime_type, image.filename)}"
-    saved_path = UPLOAD_DIR / saved_name
-    saved_path.write_bytes(content)
-
     movement_key = movement_name.lower().replace(" ", "_")
     movement_cn = MOVEMENT_NAMES.get(movement_key, movement_name)
     quantitative = _parse_pose_data(pose_data, movement_key)
 
+    saved_name = f"{uuid.uuid4().hex}{image_extension(mime_type)}"
+    saved_path = UPLOAD_DIR / saved_name
+    try:
+        saved_path.write_bytes(content)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="动作图片保存失败") from exc
+    photo_url = f"/uploads/pose/{saved_name}"
+
     if quantitative and not quantitative["quality"]["is_usable"]:
+        analysis_id = await _persist_pose_media_or_rollback(
+            db, user_id, [photo_url], [saved_path]
+        )
         return {
-            "analysis_id": f"pose_{uuid.uuid4().hex[:8]}",
-            "photo_url": f"/uploads/pose/{saved_name}",
+            "analysis_id": analysis_id,
+            "photo_url": photo_url,
             "movement_name": movement_cn,
             "overall_score": 0,
             "score": 0,
@@ -459,9 +607,12 @@ async def analyze_pose(
     # 伤病风险提示
     risk_warnings = _build_risk_warnings(user, movement_key)
 
+    analysis_id = await _persist_pose_media_or_rollback(
+        db, user_id, [photo_url], [saved_path]
+    )
     return {
-        "analysis_id": f"pose_{uuid.uuid4().hex[:8]}",
-        "photo_url": f"/uploads/pose/{saved_name}",
+        "analysis_id": analysis_id,
+        "photo_url": photo_url,
         "movement_name": result["movement_name"],
         "overall_score": result["overall_score"],
         "score": result["overall_score"],
@@ -502,18 +653,18 @@ async def analyze_pose_video(
         raise HTTPException(status_code=404, detail="用户不存在")
 
     video_content = await video.read()
-    if len(video_content) > 80 * 1024 * 1024:
+    if len(video_content) > MAX_VIDEO_BYTES:
         raise HTTPException(status_code=400, detail="Video must be smaller than 80MB")
-    if video.content_type and video.content_type not in VIDEO_MIME_TYPES and not video.content_type.startswith("video/"):
-        raise HTTPException(status_code=400, detail=f"Unsupported video type: {video.content_type}")
+    try:
+        _, video_ext = detect_video_type(video_content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    video_ext = Path(video.filename or "").suffix or ".mp4"
     video_name = f"{uuid.uuid4().hex}{video_ext}"
     video_path = UPLOAD_DIR / video_name
-    video_path.write_bytes(video_content)
 
     frame_payloads: list[tuple[bytes, str]] = []
-    frame_urls = []
+    frame_names: list[str] = []
     for index, frame in enumerate(frames[:6]):
         frame_bytes = await frame.read()
         if len(frame_bytes) > MAX_IMAGE_BYTES:
@@ -524,9 +675,8 @@ async def analyze_pose_video(
         except ValueError as exc:
             logger.warning("Skipping invalid video frame: filename=%r error=%s", frame.filename, exc)
             continue
-        frame_name = f"{Path(video_name).stem}_frame_{index}{image_extension(mime_type, frame.filename)}"
-        (UPLOAD_DIR / frame_name).write_bytes(frame_bytes)
-        frame_urls.append(f"/uploads/pose/{frame_name}")
+        frame_name = f"{Path(video_name).stem}_frame_{index}{image_extension(mime_type)}"
+        frame_names.append(frame_name)
         frame_payloads.append((frame_bytes, mime_type))
 
     if len(frame_payloads) < 2:
@@ -536,10 +686,24 @@ async def analyze_pose_video(
     movement_cn = MOVEMENT_NAMES.get(movement_key, movement_name)
     quantitative = _parse_pose_data(pose_data, movement_key)
 
+    saved_paths = [video_path, *(UPLOAD_DIR / name for name in frame_names)]
+    try:
+        video_path.write_bytes(video_content)
+        for saved_path, (frame_bytes, _) in zip(saved_paths[1:], frame_payloads):
+            saved_path.write_bytes(frame_bytes)
+    except OSError as exc:
+        _remove_pose_files(saved_paths)
+        raise HTTPException(status_code=500, detail="动作视频保存失败") from exc
+    video_url = f"/uploads/pose/{video_name}"
+    frame_urls = [f"/uploads/pose/{name}" for name in frame_names]
+
     if quantitative and not quantitative["quality"]["is_usable"]:
+        analysis_id = await _persist_pose_media_or_rollback(
+            db, user_id, [video_url, *frame_urls], saved_paths
+        )
         return {
-            "analysis_id": f"pose_{uuid.uuid4().hex[:8]}",
-            "video_url": f"/uploads/pose/{video_name}",
+            "analysis_id": analysis_id,
+            "video_url": video_url,
             "frame_urls": frame_urls,
             "movement_name": movement_cn,
             "overall_score": 0,
@@ -588,9 +752,12 @@ async def analyze_pose_video(
 
     risk_warnings = _build_risk_warnings(user, movement_key)
 
+    analysis_id = await _persist_pose_media_or_rollback(
+        db, user_id, [video_url, *frame_urls], saved_paths
+    )
     return {
-        "analysis_id": f"pose_{uuid.uuid4().hex[:8]}",
-        "video_url": f"/uploads/pose/{video_name}",
+        "analysis_id": analysis_id,
+        "video_url": video_url,
         "frame_urls": frame_urls,
         "movement_name": result["movement_name"],
         "overall_score": result["overall_score"],
@@ -614,4 +781,74 @@ async def analyze_pose_video(
         "pose_quality": quantitative.get("quality") if quantitative else None,
         "joint_angles": quantitative.get("joint_angles", {}) if quantitative else {},
         "media_type": "video",
+    }
+
+
+@router.delete("/history/{user_id}/{analysis_id}")
+async def delete_pose_analysis(
+    user_id: int,
+    analysis_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    record_id = analysis_id.removeprefix("pose_")
+    if len(record_id) != 32 or any(char not in "0123456789abcdef" for char in record_id):
+        raise HTTPException(status_code=400, detail="无效的 analysis_id")
+    record = await db.get(PoseAnalysisRecord, record_id)
+    if record is None or record.user_id != user_id:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    try:
+        media_urls = json.loads(record.media_paths_json or "[]")
+    except (TypeError, json.JSONDecodeError):
+        media_urls = []
+    upload_root = UPLOAD_DIR.resolve()
+    media_paths: list[Path] = []
+    for value in media_urls if isinstance(media_urls, list) else []:
+        url = str(value)
+        if not url.startswith("/uploads/pose/"):
+            logger.error("Rejected unsafe pose media path in record=%s", record_id)
+            raise HTTPException(status_code=409, detail="媒体记录路径无效，无法安全删除")
+        candidate = (UPLOAD_DIR / Path(url).name).resolve()
+        if candidate.parent != upload_root:
+            raise HTTPException(status_code=409, detail="媒体记录路径无效，无法安全删除")
+        media_paths.append(candidate)
+    media_paths = list(dict.fromkeys(media_paths))
+    try:
+        operation_dir, staged = _stage_media_deletion(media_paths)
+    except OSError:
+        logger.exception(
+            "Pose media staging failed: user_id=%s record_id=%s",
+            user_id,
+            record_id,
+        )
+        raise HTTPException(status_code=503, detail="媒体文件暂时无法删除，请稍后重试")
+    try:
+        await db.delete(record)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        try:
+            _restore_staged_media(staged)
+            operation_dir.rmdir()
+        except OSError:
+            logger.critical(
+                "Pose delete rollback could not restore media user_id=%s record_id=%s",
+                user_id,
+                record_id,
+            )
+        raise
+    try:
+        operation_dir, staged = _promote_staged_media(operation_dir, staged)
+    except OSError:
+        logger.critical(
+            "Pose deletion committed but quarantine promotion failed: "
+            "user_id=%s record_id=%s",
+            user_id,
+            record_id,
+        )
+    cleanup_pending = _cleanup_staged_media(operation_dir, staged)
+    return {
+        "deleted": True,
+        "analysis_id": analysis_id,
+        "removed_files": len(staged),
+        "cleanup_pending": cleanup_pending,
     }

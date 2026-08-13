@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
@@ -9,6 +11,7 @@ from app.services.checkin_service import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.post("/create", response_model=CheckinResponse)
@@ -21,8 +24,9 @@ async def create_user_checkin(
         return await create_checkin(db, data)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"打卡失败: {str(e)}")
+    except Exception:
+        logger.exception("Checkin write failed", extra={"user_id": data.user_id})
+        raise HTTPException(status_code=500, detail="打卡失败，请稍后重试")
 
 
 @router.get("/history/{user_id}", response_model=list[CheckinResponse])
@@ -45,5 +49,6 @@ async def get_user_review_summary(
         return await get_user_review(db, user_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"复盘失败: {str(e)}")
+    except Exception:
+        logger.exception("Checkin review failed", extra={"user_id": user_id})
+        raise HTTPException(status_code=500, detail="复盘失败，请稍后重试")

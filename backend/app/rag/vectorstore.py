@@ -1,8 +1,12 @@
 """RAG vectorstore - Chroma wrapper with version management."""
 from __future__ import annotations
+from contextlib import contextmanager
 import logging
+import os
 import shutil
+import threading
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
@@ -19,6 +23,59 @@ _BASE_DIR = Path(__file__).parent.parent.parent / "data"
 _VECTORSTORE_DIR = _BASE_DIR / "vectorstore"
 
 
+class KnowledgeVectorUnavailable(RuntimeError):
+    """Raised when the knowledge vector channel cannot be queried."""
+
+
+def _close_store(store: Optional[Chroma]) -> None:
+    if store is None:
+        return
+    client = getattr(store, "_client", None)
+    close = getattr(client, "close", None)
+    if callable(close):
+        close()
+        return
+    system = getattr(client, "_system", None)
+    stop = getattr(system, "stop", None)
+    if callable(stop):
+        stop()
+
+
+@contextmanager
+def _cross_process_publish_lock(path: Path):
+    """Hold an OS file lock while publishing/restoring the shared index."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
 class VectorStoreManager:
     """Manages Chroma vectorstore with version-safe rebuild."""
 
@@ -28,6 +85,7 @@ class VectorStoreManager:
         self._last_rebuild: Optional[float] = None
         self._stats = self._load_stats()
         self._index_version = self._stats.index_version
+        self._rebuild_lock = threading.Lock()
 
     @staticmethod
     def _meta_file() -> Path:
@@ -46,7 +104,9 @@ class VectorStoreManager:
     def _save_stats(self, stats: IndexStats) -> None:
         meta_file = self._meta_file()
         meta_file.parent.mkdir(parents=True, exist_ok=True)
-        tmp_file = meta_file.with_suffix(".json.tmp")
+        tmp_file = meta_file.with_name(
+            f"{meta_file.name}.{uuid.uuid4().hex}.tmp"
+        )
         tmp_file.write_text(stats.model_dump_json(indent=2), encoding="utf-8")
         tmp_file.replace(meta_file)
 
@@ -76,6 +136,14 @@ class VectorStoreManager:
         return self._store
 
     def index_chunks(self, chunks: list[KnowledgeChunk]) -> IndexStats:
+        if not self._rebuild_lock.acquire(blocking=False):
+            raise RuntimeError("knowledge vectorstore rebuild already in progress")
+        try:
+            return self._index_chunks(chunks)
+        finally:
+            self._rebuild_lock.release()
+
+    def _index_chunks(self, chunks: list[KnowledgeChunk]) -> IndexStats:
         """Build vectorstore from chunks. Uses safe-rebuild pattern."""
         if not chunks:
             return IndexStats()
@@ -116,12 +184,13 @@ class VectorStoreManager:
             ids.append(ch.chunk_id)
 
         # Build new store in a temp dir first
-        tmp_dir = _BASE_DIR / "vectorstore_tmp"
-        if tmp_dir.exists():
-            shutil.rmtree(tmp_dir)
+        operation_id = uuid.uuid4().hex
+        tmp_dir = _BASE_DIR / f"vectorstore_tmp_{operation_id}"
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
-        backup_dir = _BASE_DIR / "vectorstore_backup"
+        backup_dir = _BASE_DIR / f"vectorstore_backup_{operation_id}"
+        publish_lock = _BASE_DIR / "vectorstore_publish.lock"
+        new_store: Chroma | None = None
         try:
             new_store = Chroma.from_documents(
                 documents=docs,
@@ -136,67 +205,71 @@ class VectorStoreManager:
                 raise ValueError(f"New vectorstore has {count} documents, expected >= 1")
 
             # Close both stores to release file locks (required on Windows)
-            try:
-                new_store._client.close()
-            except Exception:
-                pass
-            if self._store is not None:
+            _close_store(new_store)
+            # Only publication touches the shared current directory. Builds use
+            # operation-unique paths and can run concurrently across processes.
+            with _cross_process_publish_lock(publish_lock):
+                old_moved = False
                 try:
-                    self._store._client.close()
+                    if self._store is not None:
+                        _close_store(self._store)
+                        self._store = None
+                    if _VECTORSTORE_DIR.exists():
+                        shutil.move(str(_VECTORSTORE_DIR), str(backup_dir))
+                        old_moved = True
+                    shutil.move(str(tmp_dir), str(_VECTORSTORE_DIR))
+
+                    self._store = Chroma(
+                        embedding_function=embeddings,
+                        persist_directory=str(_VECTORSTORE_DIR),
+                        collection_name="slim_agent_knowledge",
+                    )
+                    self._index_version = f"v_{int(time.time())}_{operation_id[:8]}"
+                    self._last_rebuild = time.time()
+
+                    stats = IndexStats(
+                        total_documents=len({chunk.document_id for chunk in chunks}),
+                        total_chunks=len(chunks),
+                        categories=categories,
+                        index_version=self._index_version,
+                        last_rebuild=datetime.now(UTC),
+                        content_hashes=len({
+                            chunk.content_hash for chunk in chunks if chunk.content_hash
+                        }),
+                    )
+                    self._save_stats(stats)
+                    self._stats = stats
+                    if backup_dir.exists():
+                        shutil.rmtree(backup_dir, ignore_errors=True)
                 except Exception:
-                    pass
-                self._store = None
-
-            # Swap: old -> backup, tmp -> current
-            if _VECTORSTORE_DIR.exists():
-                if backup_dir.exists():
-                    shutil.rmtree(backup_dir)
-                shutil.move(str(_VECTORSTORE_DIR), str(backup_dir))
-            shutil.move(str(tmp_dir), str(_VECTORSTORE_DIR))
-
-            # Reopen store from new location
-            self._store = Chroma(
-                embedding_function=embeddings,
-                persist_directory=str(_VECTORSTORE_DIR),
-                collection_name="slim_agent_knowledge",
-            )
-            self._index_version = f"v_{int(time.time())}"
-            self._last_rebuild = time.time()
-
-            stats = IndexStats(
-                total_documents=len({chunk.document_id for chunk in chunks}),
-                total_chunks=len(chunks),
-                categories=categories,
-                index_version=self._index_version,
-                last_rebuild=datetime.now(UTC),
-                content_hashes=len({
-                    chunk.content_hash for chunk in chunks if chunk.content_hash
-                }),
-            )
-            self._save_stats(stats)
-            self._stats = stats
-
-            # Cleanup backup
-            if backup_dir.exists():
-                shutil.rmtree(backup_dir, ignore_errors=True)
+                    if self._store is not None:
+                        try:
+                            _close_store(self._store)
+                        except Exception:
+                            pass
+                    self._store = None
+                    if _VECTORSTORE_DIR.exists():
+                        shutil.rmtree(_VECTORSTORE_DIR, ignore_errors=True)
+                    if old_moved and backup_dir.exists():
+                        shutil.move(str(backup_dir), str(_VECTORSTORE_DIR))
+                        logger.info("Vectorstore restored from backup")
+                    raise
 
             logger.info("Vectorstore built: %d chunks in %.0fms", count, (time.time()-t0)*1000)
 
         except Exception as e:
             logger.error("Vectorstore build failed: %s", e)
-            self._store = None
             self._stats = previous_stats
             self._index_version = previous_stats.index_version
-            # 清理可能存在的损坏新目录
-            if _VECTORSTORE_DIR.exists():
-                shutil.rmtree(_VECTORSTORE_DIR, ignore_errors=True)
-            # 清理 tmp
+            if new_store is not None:
+                try:
+                    _close_store(new_store)
+                except Exception:
+                    pass
             if tmp_dir.exists():
                 shutil.rmtree(tmp_dir, ignore_errors=True)
-            # 从备份恢复
             if backup_dir.exists():
-                shutil.move(str(backup_dir), str(_VECTORSTORE_DIR))
-                logger.info("Vectorstore restored from backup")
+                shutil.rmtree(backup_dir, ignore_errors=True)
             raise
 
         return stats
@@ -208,7 +281,9 @@ class VectorStoreManager:
         """Search vectorstore, return (chunk, score) pairs."""
         store = self.get_store()
         if store is None:
-            return []
+            raise KnowledgeVectorUnavailable(
+                "knowledge vector index is not initialized"
+            )
         try:
             results = store.similarity_search_with_relevance_scores(
                 query, k=k, filter=filter_dict,
@@ -238,8 +313,7 @@ class VectorStoreManager:
                 out.append((ch, max(0.0, min(1.0, score))))
             return out
         except Exception as e:
-            logger.warning("Vector search failed: %s", e)
-            return []
+            raise KnowledgeVectorUnavailable("knowledge vector search failed") from e
 
     def get_stats(self) -> IndexStats:
         store = self.get_store()
@@ -252,6 +326,11 @@ class VectorStoreManager:
         if self._stats.total_chunks == count:
             return self._stats
         return self._stats.model_copy(update={"total_chunks": count})
+
+    def close(self) -> None:
+        store = self._store
+        self._store = None
+        _close_store(store)
 
 
 # Singleton

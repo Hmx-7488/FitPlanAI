@@ -9,7 +9,7 @@ from collections import Counter
 from datetime import datetime
 from typing import cast
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -135,15 +135,57 @@ class MemoryRetriever:
         return active_memory_filters(user_id, now)
 
     async def _eligible_candidates(
-        self, db: AsyncSession, user_id: int, now: datetime
+        self,
+        db: AsyncSession,
+        user_id: int,
+        now: datetime,
+        query: str,
     ) -> list[UserMemory]:
-        statement = (
+        base_filters = self._eligible_filters(user_id, now)
+        # A recency-only LIMIT made an old but exact preference invisible before
+        # BM25 ever got a chance to rank it. Fetch a bounded lexical/domain pool
+        # first, then add recent rows as a fallback for cue-based ranking.
+        search_tokens = list(dict.fromkeys(_tokens(query)))[:16]
+        lexical_predicates = [
+            predicate
+            for token in search_tokens
+            for predicate in (
+                UserMemory.memory_key.contains(token),
+                UserMemory.content_text.contains(token),
+            )
+        ]
+        query_lower = query.lower()
+        domain_prefixes: list[str] = []
+        if any(cue in query_lower for cue in ("吃", "饮食", "餐", "食物", "营养")):
+            domain_prefixes.append("diet.")
+        if any(cue in query_lower for cue in ("训练", "运动", "健身", "力量", "有氧")):
+            domain_prefixes.append("training.")
+        if any(cue in query_lower for cue in ("目标", "计划", "减脂", "增肌", "体重")):
+            domain_prefixes.append("goal.")
+        lexical_predicates.extend(
+            UserMemory.memory_key.startswith(prefix) for prefix in domain_prefixes
+        )
+
+        candidates: dict[int, UserMemory] = {}
+        if lexical_predicates:
+            lexical_statement = (
+                select(UserMemory)
+                .where(*base_filters, or_(*lexical_predicates))
+                .order_by(desc(UserMemory.updated_at), desc(UserMemory.id))
+                .limit(self.keyword_candidate_limit)
+            )
+            for memory in (await db.execute(lexical_statement)).scalars().all():
+                candidates[memory.id] = memory
+
+        recent_statement = (
             select(UserMemory)
-            .where(*self._eligible_filters(user_id, now))
+            .where(*base_filters)
             .order_by(desc(UserMemory.updated_at), desc(UserMemory.id))
             .limit(self.keyword_candidate_limit)
         )
-        return list((await db.execute(statement)).scalars().all())
+        for memory in (await db.execute(recent_statement)).scalars().all():
+            candidates.setdefault(memory.id, memory)
+        return list(candidates.values())
 
     async def _eligible_health(
         self, db: AsyncSession, user_id: int, now: datetime
@@ -211,7 +253,7 @@ class MemoryRetriever:
             raise ValueError("limit must be positive")
 
         now = datetime.utcnow()
-        eligible = await self._eligible_candidates(db, user_id, now)
+        eligible = await self._eligible_candidates(db, user_id, now, query)
         by_id = {memory.id: memory for memory in eligible}
         keyword = (
             _keyword_ranks(eligible, query, limit=self.keyword_candidate_limit)

@@ -1,14 +1,29 @@
-from pydantic import BaseModel
+from datetime import date as calendar_date
 from typing import Optional
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class CheckinCreate(BaseModel):
-    user_id: int
-    date: str  # YYYY-MM-DD
-    foods: str = ""  # 当天饮食记录（自由文本）
-    exercises: str = ""  # 当天运动记录（自由文本）
-    weight: Optional[float] = None  # 当天体重
-    note: str = ""  # 备注（感受、状态等）
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: int = Field(gt=0)
+    date: str = Field(min_length=10, max_length=10)
+    foods: str = Field(default="", max_length=5000)
+    exercises: str = Field(default="", max_length=5000)
+    weight: Optional[float] = Field(default=None, ge=20, le=300)
+    note: str = Field(default="", max_length=2000)
+
+    @field_validator("date")
+    @classmethod
+    def validate_iso_date(cls, value: str) -> str:
+        try:
+            parsed = calendar_date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("date must use YYYY-MM-DD format") from exc
+        if parsed.isoformat() != value:
+            raise ValueError("date must use YYYY-MM-DD format")
+        return value
 
 
 class CheckinResponse(BaseModel):
@@ -19,44 +34,43 @@ class CheckinResponse(BaseModel):
     exercises: str
     weight: Optional[float]
     note: str
-    feedback: Optional[str] = None  # AI 复盘反馈
+    feedback: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class CalorieAdjustment(BaseModel):
-    """热量目标调整草案（仅建议，需用户确认后才写入计划）"""
-
     current_target: int
     suggested_target: int
     delta_kcal: int
-    weekly_change_pct: float  # 每周体重变化百分比
+    weekly_change_pct: float
     reason: str
-    basis: str  # 调整依据说明
+    basis: str
 
 
 class WorkoutAdjustmentChange(BaseModel):
-    """训练调整单条变更"""
-    day: str  # "all" 或具体天数 "1"/"2"/...
-    action: str  # replace/reduce_volume/increase_cardio/increase_volume
-    old_exercise_keyword: Optional[str] = None  # replace 时的旧动作关键词
-    detail: Optional[str] = None  # 具体调整说明
+    day: str
+    action: str
+    old_exercise_keyword: Optional[str] = None
+    detail: Optional[str] = None
     reason: str
 
 
 class WorkoutAdjustment(BaseModel):
-    """训练计划调整草案（仅建议，需用户确认后才写入计划）"""
     reason: str
     changes: list[WorkoutAdjustmentChange]
-    risk_notes: list[str] = []
+    risk_notes: list[str] = Field(default_factory=list)
 
 
 class ReviewResponse(BaseModel):
     user_id: int
     checkin_count: int
     recent_checkins: list[CheckinResponse]
-    review_summary: str  # AI 复盘总结
-    next_day_advice: str  # 次日调整建议
-    calorie_adjustment: Optional[CalorieAdjustment] = None  # 热量调整草案
-    workout_adjustment: Optional[WorkoutAdjustment] = None  # 训练调整草案
+    review_summary: str
+    next_day_advice: str
+    source_plan_id: int | None = None
+    source_daily_calorie_target: int | None = None
+    source_workout_plan_json: str | None = None
+    source_checkin_id: int
+    calorie_adjustment: Optional[CalorieAdjustment] = None
+    workout_adjustment: Optional[WorkoutAdjustment] = None

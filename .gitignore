@@ -19,6 +19,7 @@ env/
 
 # 向量库（运行时自动生成）
 backend/data/vectorstore/
+backend/data/memory_vectorstore/
 backend/data/index_meta.json
 
 # IDE
@@ -46,6 +47,7 @@ tmp/
 
 # 上传文件（用户数据）
 backend/data/uploads/
+backend/data/.media_deletion_quarantine/
 
 # 动作库媒体文件（© Gym visual，体积大，不进 git）
 backend/data/exercises/exercise_media/

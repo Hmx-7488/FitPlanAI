@@ -1,14 +1,16 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick, useTemplateRef } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick, useTemplateRef } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { createProfile, getProfile, analyzeBodyPhoto } from '../api'
+import { getProfile, analyzeBodyPhoto } from '../api'
+import { saveProfile } from '../services/profileService'
 import type { UserProfile } from '../types'
 import gsap from 'gsap'
 
 const router = useRouter()
 const loading = ref(false)
 const profileLoaded = ref(false)
+const profileLoadFailed = ref(false)
 const pageRef = useTemplateRef<HTMLElement>('pageRef')
 
 function animatePage() {
@@ -105,7 +107,10 @@ function removeFromList(list: string[], index: number) {
 // 页面加载时恢复已有档案数据
 onMounted(async () => {
   const userId = localStorage.getItem('userId')
-  if (!userId) return
+  if (!userId) {
+    animatePage()
+    return
+  }
   try {
     const existing = await getProfile(Number(userId))
     if (existing) {
@@ -135,11 +140,23 @@ onMounted(async () => {
       form.value.prep_time_limit_minutes = existing.prep_time_limit_minutes
       profileLoaded.value = true
     }
-  } catch { /* 首次建档，无已有数据 */ }
-  animatePage()
+  } catch (err: any) {
+    if (err.response?.status === 404) {
+      localStorage.removeItem('userId')
+    } else {
+      profileLoadFailed.value = true
+      ElMessage.error('档案加载失败，请刷新后重试')
+    }
+  } finally {
+    animatePage()
+  }
 })
 
 async function handleSubmit() {
+  if (profileLoadFailed.value) {
+    ElMessage.error('档案状态尚未确认，请刷新后重试')
+    return
+  }
   if (form.value.age <= 0 || form.value.height <= 0 || form.value.weight <= 0) {
     ElMessage.warning('请填写有效的身体数据')
     return
@@ -151,7 +168,14 @@ async function handleSubmit() {
 
   loading.value = true
   try {
-    const user = await createProfile(form.value)
+    const storedUserId = Number(localStorage.getItem('userId'))
+    const profilePayload: UserProfile = {
+      ...form.value,
+      body_fat_rate: typeof form.value.body_fat_rate === 'number'
+        ? form.value.body_fat_rate
+        : null,
+    }
+    const user = await saveProfile(profileLoaded.value, storedUserId, profilePayload)
     localStorage.setItem('userId', String(user.id))
     createdUserId.value = user.id
 
@@ -179,9 +203,18 @@ function onBodyPhotoChange(e: Event) {
     ElMessage.warning('请选择图片文件')
     return
   }
+  if (bodyPhotoPreview.value.startsWith('blob:')) {
+    URL.revokeObjectURL(bodyPhotoPreview.value)
+  }
   bodyPhotoFile.value = file
   bodyPhotoPreview.value = URL.createObjectURL(file)
 }
+
+onUnmounted(() => {
+  if (bodyPhotoPreview.value.startsWith('blob:')) {
+    URL.revokeObjectURL(bodyPhotoPreview.value)
+  }
+})
 
 async function doBodyPhotoAnalyze() {
   if (!bodyPhotoFile.value || !createdUserId.value) return

@@ -5,11 +5,13 @@ import math
 import uuid
 from datetime import date as calendar_date
 from pathlib import Path
-from typing import List, Optional
-from pydantic import BaseModel
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
+from typing import Literal
+from langchain_core.messages import HumanMessage
+from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, Path as ApiPath
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete, or_
+from sqlalchemy import select, or_
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from app.core.database import get_db
 from app.core.time import today_str
 from app.models.user import User, MealLog, MealRecognition, Food
@@ -18,7 +20,7 @@ from app.services.image_utils import (
     validate_image,
 )
 from app.services.vision_service import get_vision_llm, recognize_food_items
-from app.tools.calorie_tools import calc_bmr, calc_daily_calorie
+from app.services.calorie_target_service import resolve_calorie_target
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -40,6 +42,19 @@ def _detect_image_mime(image_bytes: bytes, filename: str | None, content_type: s
 
 def _today() -> str:
     return today_str()
+
+
+def _unlink_replaced_meal_image(path_value: str, keep_path: str) -> None:
+    if not path_value or path_value == keep_path:
+        return
+    old_path = Path(path_value)
+    try:
+        if old_path.parent.resolve() != UPLOAD_DIR.resolve():
+            logger.warning("Refusing to delete meal image outside upload directory: %s", old_path)
+            return
+        old_path.unlink(missing_ok=True)
+    except OSError:
+        logger.exception("Could not remove replaced meal image: %s", old_path)
 
 
 def _finite_number(value: object, field: str, maximum: float) -> float:
@@ -171,22 +186,26 @@ async def _anchor_food_database(
 
 
 class IngredientItem(BaseModel):
-    name: str
-    display_name: str
-    estimated_weight_g: float
-    confidence: float = 1.0
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=100)
+    display_name: str = Field(min_length=1, max_length=100)
+    estimated_weight_g: float = Field(gt=0, le=5000)
+    confidence: float = Field(default=1.0, ge=0, le=1)
 
 
 class CalculateRequest(BaseModel):
-    recognition_id: str
-    ingredients: List[IngredientItem]
-    meal_type: str = "lunch"
+    model_config = ConfigDict(extra="forbid")
+
+    recognition_id: str = Field(min_length=1, max_length=64)
+    ingredients: list[IngredientItem] = Field(min_length=1, max_length=20)
+    meal_type: Literal["breakfast", "lunch", "dinner", "snack"] = "lunch"
 
 
 @router.post("/analyze")
 async def analyze_meal(
-    user_id: int = Form(...),
-    meal_type: str = Form("lunch"),
+    user_id: int = Form(..., gt=0),
+    meal_type: Literal["breakfast", "lunch", "dinner", "snack"] = Form("lunch"),
     image: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
 ):
@@ -237,19 +256,10 @@ async def analyze_meal(
 
     # 计算每日热量缺口
     today = _today()
-    bmr = calc_bmr(
-        gender=user.gender,
-        weight=user.weight,
-        height=user.height,
-        age=user.age,
-    )
-    calorie_info = calc_daily_calorie(
-        bmr=bmr,
-        activity_level=user.activity_level or "medium",
-        goal_type=user.goal_type or "fat_loss",
-    )
-    target_kcal = calorie_info["target_calories"]
-    tdee = calorie_info["tdee"]
+    calorie_target = await resolve_calorie_target(db, user)
+    calorie_info = calorie_target.calorie_info
+    target_kcal = calorie_target.target_calories
+    tdee = calorie_target.tdee
 
     # 查询今日已记录的餐食
     existing = await db.execute(
@@ -293,24 +303,41 @@ async def analyze_meal(
     }
 
     # 保存餐食记录
-    await db.execute(
-        delete(MealLog).where(
+    replaced_paths = list((await db.execute(
+        select(MealLog.image_path).where(
             MealLog.user_id == user_id,
             MealLog.date == today,
             MealLog.meal_type == meal_type,
         )
-    )
+    )).scalars().all())
 
-    meal_log = MealLog(
-        user_id=user_id,
-        date=today,
-        meal_type=meal_type,
-        image_path=str(saved_path),
-        items_json=json.dumps(items, ensure_ascii=False),
-        meal_total_json=json.dumps(meal_total, ensure_ascii=False),
-    )
-    db.add(meal_log)
-    await db.commit()
+    meal_values = {
+        "user_id": user_id,
+        "date": today,
+        "meal_type": meal_type,
+        "image_path": str(saved_path),
+        "items_json": json.dumps(items, ensure_ascii=False),
+        "meal_total_json": json.dumps(meal_total, ensure_ascii=False),
+    }
+    insert_stmt = sqlite_insert(MealLog).values(**meal_values)
+    try:
+        await db.execute(insert_stmt.on_conflict_do_update(
+            index_elements=[MealLog.user_id, MealLog.date, MealLog.meal_type],
+            set_={
+                "image_path": insert_stmt.excluded.image_path,
+                "items_json": insert_stmt.excluded.items_json,
+                "meal_total_json": insert_stmt.excluded.meal_total_json,
+                "created_at": insert_stmt.excluded.created_at,
+            },
+        ))
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        saved_path.unlink(missing_ok=True)
+        logger.exception("Could not persist meal analysis", extra={"user_id": user_id})
+        raise HTTPException(status_code=500, detail="餐食记录保存失败，请稍后重试")
+    for replaced_path in replaced_paths:
+        _unlink_replaced_meal_image(replaced_path, str(saved_path))
 
     # 构建追问
     dish_names = "、".join(i.get("dish_name", "") for i in items[:3])
@@ -327,8 +354,8 @@ async def analyze_meal(
 
 @router.post("/recognize")
 async def recognize_meal(
-    user_id: int = Form(...),
-    meal_type: str = Form("lunch"),
+    user_id: int = Form(..., gt=0),
+    meal_type: Literal["breakfast", "lunch", "dinner", "snack"] = Form("lunch"),
     image: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
 ):
@@ -468,7 +495,15 @@ async def calculate_meal(
             json_end = raw.rfind("}") + 1
             raw = raw[json_start:json_end]
         nutrition = json.loads(raw)
-        items = _normalize_meal_items(nutrition.get("items"))
+        model_items = _normalize_meal_items(nutrition.get("items"))
+        if len(model_items) != len(request.ingredients):
+            raise ValueError("nutrition item count does not match confirmed ingredients")
+        items = []
+        for confirmed, model_item in zip(request.ingredients, model_items):
+            item = dict(model_item)
+            item["dish_name"] = confirmed.display_name
+            item["estimated_portion_g"] = confirmed.estimated_weight_g
+            items.append(item)
     except Exception:
         # 营养计算失败：明确报错；识别记录保留在数据库中，用户可直接重试。
         # 不用拍脑袋的启发式数值冒充真实营养数据落库
@@ -491,19 +526,10 @@ async def calculate_meal(
 
     # 计算每日热量缺口
     today = _today()
-    bmr = calc_bmr(
-        gender=user.gender,
-        weight=user.weight,
-        height=user.height,
-        age=user.age,
-    )
-    calorie_info = calc_daily_calorie(
-        bmr=bmr,
-        activity_level=user.activity_level or "medium",
-        goal_type=user.goal_type or "fat_loss",
-    )
-    target_kcal = calorie_info["target_calories"]
-    tdee = calorie_info["tdee"]
+    calorie_target = await resolve_calorie_target(db, user)
+    calorie_info = calorie_target.calorie_info
+    target_kcal = calorie_target.target_calories
+    tdee = calorie_target.tdee
 
     # 查询今日已记录的餐食
     existing = await db.execute(
@@ -547,26 +573,45 @@ async def calculate_meal(
     }
 
     # 保存餐食记录
-    await db.execute(
-        delete(MealLog).where(
+    replaced_paths = list((await db.execute(
+        select(MealLog.image_path).where(
             MealLog.user_id == user_id,
             MealLog.date == today,
             MealLog.meal_type == meal_type,
         )
-    )
+    )).scalars().all())
 
-    meal_log = MealLog(
-        user_id=user_id,
-        date=today,
-        meal_type=meal_type,
-        image_path=image_path,
-        items_json=json.dumps(items, ensure_ascii=False),
-        meal_total_json=json.dumps(meal_total, ensure_ascii=False),
-    )
-    db.add(meal_log)
-    # 识别暂存记录使命完成，随本次事务一并删除
-    await db.delete(cached)
-    await db.commit()
+    meal_values = {
+        "user_id": user_id,
+        "date": today,
+        "meal_type": meal_type,
+        "image_path": image_path,
+        "items_json": json.dumps(items, ensure_ascii=False),
+        "meal_total_json": json.dumps(meal_total, ensure_ascii=False),
+    }
+    insert_stmt = sqlite_insert(MealLog).values(**meal_values)
+    try:
+        await db.execute(insert_stmt.on_conflict_do_update(
+            index_elements=[MealLog.user_id, MealLog.date, MealLog.meal_type],
+            set_={
+                "image_path": insert_stmt.excluded.image_path,
+                "items_json": insert_stmt.excluded.items_json,
+                "meal_total_json": insert_stmt.excluded.meal_total_json,
+                "created_at": insert_stmt.excluded.created_at,
+            },
+        ))
+        # 识别暂存记录使命完成，随本次事务一并删除
+        await db.delete(cached)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception(
+            "Could not persist calculated meal",
+            extra={"recognition_id": request.recognition_id},
+        )
+        raise HTTPException(status_code=500, detail="餐食记录保存失败，请稍后重试")
+    for replaced_path in replaced_paths:
+        _unlink_replaced_meal_image(replaced_path, image_path)
 
     return {
         "meal_type": meal_type,
@@ -578,7 +623,7 @@ async def calculate_meal(
 
 @router.get("/daily-summary/{user_id}")
 async def get_daily_summary(
-    user_id: int,
+    user_id: int = ApiPath(..., gt=0),
     date: str = None,
     db: AsyncSession = Depends(get_db),
 ):
@@ -638,19 +683,9 @@ async def get_daily_summary(
         for meal in grouped.values()
     )
 
-    bmr = calc_bmr(
-        gender=user.gender,
-        weight=user.weight,
-        height=user.height,
-        age=user.age,
-    )
-    calorie_info = calc_daily_calorie(
-        bmr=bmr,
-        activity_level=user.activity_level or "medium",
-        goal_type=user.goal_type or "fat_loss",
-    )
-    target_kcal = calorie_info["target_calories"]
-    tdee = calorie_info["tdee"]
+    calorie_target = await resolve_calorie_target(db, user)
+    target_kcal = calorie_target.target_calories
+    tdee = calorie_target.tdee
     remaining = max(target_kcal - consumed_kcal, 0)
     current_deficit = tdee - consumed_kcal
     progress_pct = round(consumed_kcal / target_kcal * 100, 1) if target_kcal > 0 else 0

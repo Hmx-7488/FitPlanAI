@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.time import today_str
 from app.models.user import User, Plan, Checkin, MealLog
-from app.tools.calorie_tools import calc_bmr, calc_daily_calorie
+from app.services.calorie_target_service import resolve_calorie_target
 
 router = APIRouter()
 
@@ -66,7 +66,7 @@ async def get_dashboard(user_id: int, db: AsyncSession = Depends(get_db)):
     plan_stmt = (
         select(Plan)
         .where(Plan.user_id == user_id)
-        .order_by(desc(Plan.created_at))
+        .order_by(desc(Plan.created_at), desc(Plan.id))
         .limit(1)
     )
     plan_result = await db.execute(plan_stmt)
@@ -86,18 +86,8 @@ async def get_dashboard(user_id: int, db: AsyncSession = Depends(get_db)):
         }
 
     # 3. 今日热量汇总
-    bmr = calc_bmr(
-        gender=user.gender,
-        weight=user.weight,
-        height=user.height,
-        age=user.age,
-    )
-    calorie_info = calc_daily_calorie(
-        bmr=bmr,
-        activity_level=user.activity_level or "medium",
-        goal_type=user.goal_type or "fat_loss",
-    )
-    target_kcal = calorie_info["target_calories"]
+    calorie_target = await resolve_calorie_target(db, user)
+    target_kcal = calorie_target.target_calories
 
     meal_stmt = select(MealLog).where(
         MealLog.user_id == user_id, MealLog.date == today

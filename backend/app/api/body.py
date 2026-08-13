@@ -1,6 +1,7 @@
 """Body-photo analysis with quality gates, measurement fusion and history."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = Path(__file__).parent.parent.parent / "data" / "uploads" / "body"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+QUARANTINE_DIR = UPLOAD_DIR.parent.parent / ".media_deletion_quarantine" / "body"
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 VIEW_LABELS = {
@@ -43,6 +45,110 @@ def _json_load(raw: str | None, fallback: Any) -> Any:
         return value
     except (TypeError, json.JSONDecodeError):
         return fallback
+
+
+def _unlink_media_file(path: Path) -> None:
+    path.unlink(missing_ok=True)
+
+
+def _move_media_file(source: Path, target: Path) -> None:
+    source.replace(target)
+
+
+def _stage_media_deletion(paths: list[Path]) -> tuple[Path, list[tuple[Path, Path]]]:
+    operation_dir = QUARANTINE_DIR / "pending" / uuid.uuid4().hex
+    operation_dir.mkdir(parents=True, exist_ok=False)
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for source in paths:
+            if not source.exists():
+                continue
+            target = operation_dir / source.name
+            _move_media_file(source, target)
+            staged.append((source, target))
+    except OSError:
+        for source, target in reversed(staged):
+            try:
+                _move_media_file(target, source)
+            except OSError:
+                logger.critical("Failed to restore staged body media file=%s", source.name)
+        try:
+            operation_dir.rmdir()
+        except OSError:
+            pass
+        raise
+    return operation_dir, staged
+
+
+def _restore_staged_media(staged: list[tuple[Path, Path]]) -> None:
+    for source, target in reversed(staged):
+        if target.exists():
+            _move_media_file(target, source)
+
+
+def _promote_staged_media(
+    operation_dir: Path,
+    staged: list[tuple[Path, Path]],
+) -> tuple[Path, list[tuple[Path, Path]]]:
+    committed_root = QUARANTINE_DIR / "committed"
+    committed_root.mkdir(parents=True, exist_ok=True)
+    committed_dir = committed_root / operation_dir.name
+    _move_media_file(operation_dir, committed_dir)
+    return committed_dir, [
+        (source, committed_dir / target.name) for source, target in staged
+    ]
+
+
+def _cleanup_staged_media(
+    operation_dir: Path,
+    staged: list[tuple[Path, Path]],
+) -> bool:
+    pending = False
+    for _, target in staged:
+        try:
+            _unlink_media_file(target)
+        except OSError:
+            pending = True
+            logger.exception("Quarantined body media cleanup failed file=%s", target.name)
+    if not pending:
+        try:
+            operation_dir.rmdir()
+        except OSError:
+            pass
+    return pending
+
+
+def cleanup_body_deletion_quarantine() -> int:
+    """Retry removal of media already detached from committed deleted records."""
+    committed_root = QUARANTINE_DIR / "committed"
+    if not committed_root.exists():
+        return 0
+    removed = 0
+    for operation_dir in committed_root.iterdir():
+        if not operation_dir.is_dir():
+            continue
+        for target in operation_dir.iterdir():
+            if target.is_file():
+                try:
+                    _unlink_media_file(target)
+                    removed += 1
+                except OSError:
+                    logger.warning("Body quarantine cleanup will retry file=%s", target.name)
+        try:
+            operation_dir.rmdir()
+        except OSError:
+            pass
+    return removed
+
+
+def _rollback_saved_images(saved_images: list[dict]) -> None:
+    for item in saved_images:
+        path = item.get("path")
+        if isinstance(path, Path):
+            try:
+                _unlink_media_file(path)
+            except OSError:
+                logger.exception("Failed to roll back body image: %s", path.name)
 
 
 def _extract_json_object(raw: str) -> dict:
@@ -373,9 +479,14 @@ async def analyze_body_photo(
         uploads.append(("front", image))
     if not uploads:
         raise HTTPException(status_code=400, detail="至少上传一张身材照片")
-    saved_images = [await _save_body_image(upload, view, user_id) for view, upload in uploads[:3]]
     previous = await _latest_completed(db, user_id)
-
+    saved_images: list[dict] = []
+    try:
+        for view, upload in uploads[:3]:
+            saved_images.append(await _save_body_image(upload, view, user_id))
+    except Exception:
+        _rollback_saved_images(saved_images)
+        raise
     photo_urls = {item["view"]: f"/uploads/body/{item['filename']}" for item in saved_images}
     view_metadata = {
         item["view"]: {
@@ -405,7 +516,8 @@ async def analyze_body_photo(
                     "detail": "high",
                 }},
             ])
-        raw = llm.invoke([HumanMessage(content=content)]).content
+        response = await asyncio.to_thread(llm.invoke, [HumanMessage(content=content)])
+        raw = response.content
         logger.info(
             "Body analysis response received: user_id=%s response_chars=%s",
             user_id,
@@ -505,7 +617,14 @@ async def analyze_body_photo(
         )
         if comparable:
             try:
-                comparison = _run_comparison(llm, saved_images, previous, comparable, measurements)
+                comparison = await asyncio.to_thread(
+                    _run_comparison,
+                    llm,
+                    saved_images,
+                    previous,
+                    comparable,
+                    measurements,
+                )
             except Exception:
                 logger.exception("Body history comparison failed: user_id=%s", user_id)
                 comparison = {
@@ -536,8 +655,13 @@ async def analyze_body_photo(
         is_ai=1 if is_ai else 0,
     )
     db.add(record)
-    await db.commit()
-    await db.refresh(record)
+    try:
+        await db.commit()
+        await db.refresh(record)
+    except Exception:
+        await db.rollback()
+        _rollback_saved_images(saved_images)
+        raise
 
     auto_fill = bool(
         status == "completed"
@@ -612,11 +736,8 @@ async def delete_body_analysis(
         raise HTTPException(status_code=404, detail="记录不存在")
 
     photo_urls = _json_load(record.photo_urls_json, {})
-    await db.delete(record)
-    await db.commit()
-
     # 清理照片文件：仅限身材上传目录内，防路径穿越
-    removed_files = 0
+    media_paths: list[Path] = []
     upload_root = UPLOAD_DIR.resolve()
     for url in photo_urls.values():
         filename = str(url).rsplit("/", 1)[-1]
@@ -624,13 +745,54 @@ async def delete_body_analysis(
             continue
         candidate = (UPLOAD_DIR / filename).resolve()
         if candidate.parent == upload_root and candidate.exists():
-            candidate.unlink()
-            removed_files += 1
+            media_paths.append(candidate)
+    media_paths = list(dict.fromkeys(media_paths))
+    try:
+        operation_dir, staged = _stage_media_deletion(media_paths)
+    except OSError:
+        logger.exception(
+            "Body image staging failed: user_id=%s analysis_id=%s",
+            user_id,
+            analysis_id,
+        )
+        raise HTTPException(status_code=503, detail="照片文件暂时无法删除，请稍后重试")
+
+    try:
+        await db.delete(record)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        try:
+            _restore_staged_media(staged)
+            operation_dir.rmdir()
+        except OSError:
+            logger.critical(
+                "Body delete rollback could not restore media user_id=%s analysis_id=%s",
+                user_id,
+                analysis_id,
+            )
+        raise
+
+    try:
+        operation_dir, staged = _promote_staged_media(operation_dir, staged)
+    except OSError:
+        logger.critical(
+            "Body deletion committed but quarantine promotion failed: "
+            "user_id=%s analysis_id=%s",
+            user_id,
+            analysis_id,
+        )
+    cleanup_pending = _cleanup_staged_media(operation_dir, staged)
 
     logger.info(
         "Body analysis deleted: user_id=%s analysis_id=%s removed_files=%s",
         user_id,
         analysis_id,
-        removed_files,
+        len(staged),
     )
-    return {"deleted": True, "analysis_id": analysis_id, "removed_files": removed_files}
+    return {
+        "deleted": True,
+        "analysis_id": analysis_id,
+        "removed_files": len(staged),
+        "cleanup_pending": cleanup_pending,
+    }

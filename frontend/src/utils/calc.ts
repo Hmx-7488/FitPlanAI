@@ -72,7 +72,13 @@ function calcTargetCalories(tdee: number, goalType: GoalType = 'fat_loss'): numb
   return Math.max(Math.round(target), 1200)
 }
 
-function calcMacros(targetCalories: number, weight: number, activityLevel: string, goalType: GoalType = 'fat_loss') {
+function calcMacros(
+  targetCalories: number,
+  weight: number,
+  activityLevel: string,
+  goalType: GoalType = 'fat_loss',
+  dietPreference: UserProfile['diet_preference'] = 'balanced',
+) {
   let proteinPerKg: number
   if (goalType === 'muscle_gain') {
     proteinPerKg = activityLevel === 'high' || activityLevel === 'very_high' ? 2.2 : 1.8
@@ -82,11 +88,17 @@ function calcMacros(targetCalories: number, weight: number, activityLevel: strin
   const proteinG = Math.round(weight * proteinPerKg)
   const proteinCal = proteinG * 4
 
-  const fatCal = targetCalories * 0.25
-  const fatG = Math.round(fatCal / 9)
-
-  const carbCal = targetCalories - proteinCal - fatCal
-  const carbsG = Math.max(Math.round(carbCal / 4), 50)
+  let carbsG: number
+  let fatG: number
+  if (dietPreference === 'low_carb') {
+    carbsG = Math.max(Math.round(targetCalories * 0.20 / 4), 50)
+    fatG = Math.round(Math.max(targetCalories - proteinCal - carbsG * 4, 0) / 9)
+  } else {
+    const fatCal = targetCalories * 0.25
+    fatG = Math.round(fatCal / 9)
+    const carbCal = targetCalories - proteinCal - fatCal
+    carbsG = Math.max(Math.round(carbCal / 4), 50)
+  }
 
   return {
     proteinG,
@@ -112,9 +124,17 @@ export function analyzeProfile(profile: UserProfile): AnalysisResult {
   const deficit = goalType === 'muscle_gain'
     ? targetCalories - tdee  // 增肌：盈余为正数
     : tdee - targetCalories  // 减脂：缺口为正数
-  const macros = calcMacros(targetCalories, profile.weight, profile.activity_level, goalType)
+  const macros = calcMacros(
+    targetCalories,
+    profile.weight,
+    profile.activity_level,
+    goalType,
+    profile.diet_preference,
+  )
   const weightToLose = +(profile.weight - profile.target_weight).toFixed(1)
-  const estimatedWeeks = estimateWeeks(weightToLose)
+  const estimatedWeeks = profile.target_weeks && profile.target_weeks > 0
+    ? Math.round(profile.target_weeks)
+    : estimateWeeks(weightToLose)
 
   return {
     bmi,

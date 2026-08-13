@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import String, Integer, Float, DateTime, Text, JSON, Index, UniqueConstraint
+from sqlalchemy import String, Integer, Float, DateTime, Text, JSON, Index, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 from app.core.database import Base
 
@@ -54,6 +54,9 @@ class Plan(Base):
 
 class Checkin(Base):
     __tablename__ = "checkins"
+    __table_args__ = (
+        UniqueConstraint("user_id", "date", name="uq_checkin_user_date"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer)
@@ -104,6 +107,8 @@ class RecipeImageJob(Base):
     image_url: Mapped[str] = mapped_column(Text, default="")
     provider_task_id: Mapped[str] = mapped_column(String(100), default="")
     provider_request_id: Mapped[str] = mapped_column(String(100), default="")
+    lease_owner: Mapped[str] = mapped_column(String(80), nullable=True)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     error_code: Mapped[str] = mapped_column(String(100), default="")
     error_message: Mapped[str] = mapped_column(Text, default="")
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -117,6 +122,14 @@ class RecipeImageJob(Base):
 class MealLog(Base):
     """餐食热量识别记录"""
     __tablename__ = "meal_logs"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "date",
+            "meal_type",
+            name="uq_meal_log_user_date_type",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(Integer)
@@ -207,6 +220,17 @@ class BodyAnalysis(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
+class PoseAnalysisRecord(Base):
+    """Persistent ownership metadata for uploaded pose-analysis media."""
+
+    __tablename__ = "pose_analysis_records"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    media_paths_json: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class ChatConversation(Base):
     """聊天 Agent 会话。"""
     __tablename__ = "chat_conversations"
@@ -238,6 +262,21 @@ class ChatMessage(Base):
 class ChatConversationSummary(Base):
     """Versioned, cursor-based summary for one chat conversation."""
     __tablename__ = "chat_conversation_summaries"
+    __table_args__ = (
+        Index(
+            "uq_chat_summary_pending_conversation",
+            "conversation_id",
+            unique=True,
+            sqlite_where=text("status = 'pending'"),
+        ),
+        Index(
+            "uq_chat_summary_terminal_cursor",
+            "conversation_id",
+            "covered_through_message_id",
+            unique=True,
+            sqlite_where=text("status IN ('completed', 'superseded')"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     conversation_id: Mapped[int] = mapped_column(Integer, index=True)

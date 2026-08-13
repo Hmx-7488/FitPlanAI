@@ -1,8 +1,8 @@
 import json
-from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
-from app.models.user import Checkin, Plan, User
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from app.models.user import Checkin, User
 from app.schemas.checkin import (
     CalorieAdjustment,
     CheckinCreate,
@@ -12,7 +12,10 @@ from app.schemas.checkin import (
 )
 from app.graph.workflow import run_review_workflow
 from app.services.adjustment_service import compute_calorie_adjustment
-from app.tools.calorie_tools import calc_bmr, calc_daily_calorie
+from app.services.calorie_target_service import (
+    ResolvedCalorieTarget,
+    resolve_calorie_target,
+)
 
 
 async def create_checkin(db: AsyncSession, data: CheckinCreate) -> CheckinResponse:
@@ -22,35 +25,20 @@ async def create_checkin(db: AsyncSession, data: CheckinCreate) -> CheckinRespon
     if not user:
         raise ValueError("用户不存在")
 
-    # 检查是否已有当天打卡（允许覆盖）
-    existing = await db.execute(
-        select(Checkin).where(
-            Checkin.user_id == data.user_id,
-            Checkin.date == data.date,
-        )
-    )
-    checkin = existing.scalar_one_or_none()
-
-    if checkin:
-        # 更新已有打卡
-        checkin.foods = data.foods
-        checkin.exercises = data.exercises
-        checkin.weight = data.weight
-        checkin.note = data.note
-    else:
-        # 新建打卡
-        checkin = Checkin(
-            user_id=data.user_id,
-            date=data.date,
-            foods=data.foods,
-            exercises=data.exercises,
-            weight=data.weight,
-            note=data.note,
-        )
-        db.add(checkin)
-
+    values = {
+        "user_id": data.user_id,
+        "date": data.date,
+        "foods": data.foods,
+        "exercises": data.exercises,
+        "weight": data.weight,
+        "note": data.note,
+    }
+    # REPLACE intentionally assigns a new id when a day's evidence changes.
+    # Review drafts use that id as their optimistic-concurrency source version.
+    stmt = sqlite_insert(Checkin).values(**values).prefix_with("OR REPLACE").returning(Checkin.id)
+    checkin_id = (await db.execute(stmt)).scalar_one()
     await db.commit()
-    await db.refresh(checkin)
+    checkin = await db.get(Checkin, checkin_id)
 
     return CheckinResponse(
         id=checkin.id,
@@ -70,7 +58,7 @@ async def get_checkin_history(
     result = await db.execute(
         select(Checkin)
         .where(Checkin.user_id == user_id)
-        .order_by(desc(Checkin.date))
+        .order_by(desc(Checkin.date), desc(Checkin.id))
         .limit(limit)
     )
     checkins = result.scalars().all()
@@ -126,7 +114,7 @@ async def get_user_review(db: AsyncSession, user_id: int) -> ReviewResponse:
     result = await db.execute(
         select(Checkin)
         .where(Checkin.user_id == user_id)
-        .order_by(desc(Checkin.date))
+        .order_by(desc(Checkin.date), desc(Checkin.id))
         .limit(21)
     )
     checkins = result.scalars().all()
@@ -165,7 +153,8 @@ async def get_user_review(db: AsyncSession, user_id: int) -> ReviewResponse:
     ]
 
     # 闭环：基于体重趋势计算热量调整草案（仅建议，确认后才写入）
-    adjustment = await _build_calorie_adjustment(db, user)
+    calorie_target = await resolve_calorie_target(db, user)
+    adjustment = await _build_calorie_adjustment(db, user, calorie_target)
 
     # 训练调整草案
     workout_adj_data = review_result.get("workout_adjustment")
@@ -177,37 +166,25 @@ async def get_user_review(db: AsyncSession, user_id: int) -> ReviewResponse:
         recent_checkins=recent_checkins,
         review_summary=review_result["review_summary"],
         next_day_advice=review_result["next_day_advice"],
+        source_plan_id=calorie_target.plan.id if calorie_target.plan else None,
+        source_daily_calorie_target=calorie_target.target_calories,
+        source_workout_plan_json=(
+            calorie_target.plan.workout_plan_json if calorie_target.plan else None
+        ),
+        source_checkin_id=checkins[0].id,
         calorie_adjustment=adjustment,
         workout_adjustment=workout_adjustment,
     )
 
 
 async def _build_calorie_adjustment(
-    db: AsyncSession, user: User
+    db: AsyncSession,
+    user: User,
+    resolved: ResolvedCalorieTarget | None = None,
 ) -> CalorieAdjustment | None:
     """汇总当前热量目标与体重趋势，生成调整草案。"""
-    # 当前热量目标：优先取最新计划，否则按档案现算
-    plan_stmt = (
-        select(Plan)
-        .where(Plan.user_id == user.id)
-        .order_by(desc(Plan.created_at))
-        .limit(1)
-    )
-    plan = (await db.execute(plan_stmt)).scalar_one_or_none()
-    if plan:
-        current_target = plan.daily_calorie_target
-    else:
-        bmr = calc_bmr(
-            gender=user.gender,
-            weight=user.weight,
-            height=user.height,
-            age=user.age,
-        )
-        current_target = calc_daily_calorie(
-            bmr=bmr,
-            activity_level=user.activity_level or "medium",
-            goal_type=user.goal_type or "fat_loss",
-        )["target_calories"]
+    resolved = resolved or await resolve_calorie_target(db, user)
+    current_target = resolved.target_calories
 
     # 体重趋势：最近 60 次称重，按日期升序
     weight_stmt = (

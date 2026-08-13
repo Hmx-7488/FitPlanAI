@@ -8,7 +8,6 @@ import {
   applyCalorieAdjustment,
   applyWorkoutAdjustment,
   getExerciseDetail,
-  getLatestPlan,
 } from '../api'
 import type { CheckinResponse, ReviewResponse } from '../types'
 import { sanitizeHtml } from '../utils/sanitize'
@@ -90,10 +89,32 @@ const applyingAdjustment = ref(false)
 async function applyAdjustment() {
   const adj = review.value?.calorie_adjustment
   if (!adj) return
+  if (applyingAdjustment.value) return
+  const sourcePlanId = review.value?.source_plan_id
+  const sourceTarget = review.value?.source_daily_calorie_target
+  const sourceCheckinId = review.value?.source_checkin_id
+  if (
+    !Number.isInteger(sourcePlanId)
+    || !Number.isInteger(sourceCheckinId)
+    || typeof sourceTarget !== 'number'
+  ) {
+    ElMessage.error('该复盘缺少计划快照，请重新生成复盘后再应用')
+    return
+  }
   const userId = Number(localStorage.getItem('userId'))
+  if (!Number.isInteger(userId) || userId <= 0) {
+    ElMessage.error('用户档案无效，请重新登录或建档')
+    return
+  }
   applyingAdjustment.value = true
   try {
-    await applyCalorieAdjustment(userId, adj.suggested_target)
+    await applyCalorieAdjustment(
+      userId,
+      sourcePlanId!,
+      sourceCheckinId!,
+      sourceTarget,
+      adj.suggested_target,
+    )
     ElMessage.success(`热量目标已调整为 ${adj.suggested_target} kcal`)
     if (review.value) {
       review.value = { ...review.value, calorie_adjustment: null }
@@ -119,18 +140,26 @@ async function applyWorkoutAdjust() {
   const adj = review.value?.workout_adjustment
   if (!adj) return
   if (applyingWorkoutAdjust.value) return
-  applyingWorkoutAdjust.value = true
+  const sourcePlanId = review.value?.source_plan_id
+  const sourceCheckinId = review.value?.source_checkin_id
+  const baseWorkoutPlanJson = review.value?.source_workout_plan_json
+  if (
+    !Number.isInteger(sourcePlanId)
+    || !Number.isInteger(sourceCheckinId)
+    || !baseWorkoutPlanJson
+  ) {
+    ElMessage.error('该复盘缺少训练计划快照，请重新生成复盘后再应用')
+    return
+  }
   const userId = Number(localStorage.getItem('userId'))
+  if (!Number.isInteger(userId) || userId <= 0) {
+    ElMessage.error('用户档案无效，请重新登录或建档')
+    return
+  }
+  applyingWorkoutAdjust.value = true
 
-  // 读取当前计划的 workout_plan_json，应用调整后写回
+  // 始终基于生成复盘时的快照应用；后端会用该基线做原子并发校验。
   try {
-    const planRes = await getLatestPlan(userId)
-    if (!planRes?.workout_plan_json) {
-      ElMessage.error('未找到当前训练计划')
-      return
-    }
-
-    const baseWorkoutPlanJson = planRes.workout_plan_json
     const workout = JSON.parse(baseWorkoutPlanJson)
 
     const workoutDays = Array.isArray(workout.weekly_plan) ? workout.weekly_plan : []
@@ -202,7 +231,13 @@ async function applyWorkoutAdjust() {
       return
     }
 
-    await applyWorkoutAdjustment(userId, planRes.id, baseWorkoutPlanJson, JSON.stringify(workout))
+    await applyWorkoutAdjustment(
+      userId,
+      sourcePlanId!,
+      sourceCheckinId!,
+      baseWorkoutPlanJson,
+      JSON.stringify(workout),
+    )
     ElMessage.success(hasReplacementFlag ? '训练量已更新，需替换动作已在计划中标记' : '训练计划已调整')
     if (review.value) {
       review.value = { ...review.value, workout_adjustment: null }

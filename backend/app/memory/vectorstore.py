@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 _BASE_DIR = Path(__file__).resolve().parents[2] / "data"
 MEMORY_VECTORSTORE_DIR = _BASE_DIR / "memory_vectorstore"
+_MEMORY_COLLECTION_PREFIX = "slim_agent_user_memories_"
 
 
 class MemoryVectorUnavailable(RuntimeError):
@@ -56,7 +57,30 @@ class MemoryVectorBackend(Protocol):
 
     async def list_memory_ids(self) -> set[int]: ...
 
+    async def list_memory_revisions(self) -> dict[int, tuple[int, str]]: ...
+
     async def collection_exists(self) -> bool: ...
+
+    async def close(self) -> None: ...
+
+    async def cleanup_obsolete_collections(self) -> int: ...
+
+
+def _close_chroma_client(client: Any) -> None:
+    """Best-effort release of Chroma resources, including Windows file handles."""
+    if client is None:
+        return
+    close = getattr(client, "close", None)
+    if callable(close):
+        close()
+        return
+    system = getattr(client, "_system", None)
+    stop = getattr(system, "stop", None)
+    if callable(stop):
+        stop()
+    clear_cache = getattr(client, "clear_system_cache", None)
+    if callable(clear_cache):
+        clear_cache()
 
 
 class ChromaMemoryVectorStore:
@@ -113,9 +137,12 @@ class ChromaMemoryVectorStore:
 
     def _collection_exists_sync(self) -> bool:
         client = chromadb.PersistentClient(path=str(self.persist_directory))
-        return self.collection_name in {
-            collection.name for collection in client.list_collections()
-        }
+        try:
+            return self.collection_name in {
+                collection.name for collection in client.list_collections()
+            }
+        finally:
+            _close_chroma_client(client)
 
     @staticmethod
     def _document_id(memory_id: int) -> str:
@@ -207,14 +234,64 @@ class ChromaMemoryVectorStore:
     async def list_memory_ids(self) -> set[int]:
         if not await self.collection_exists():
             return set()
-        return await asyncio.to_thread(self._list_memory_ids_sync)
+        return set(await self.list_memory_revisions())
 
-    def _list_memory_ids_sync(self) -> set[int]:
+    async def list_memory_revisions(self) -> dict[int, tuple[int, str]]:
+        if not await self.collection_exists():
+            return {}
+        return await asyncio.to_thread(self._list_memory_revisions_sync)
+
+    def _list_memory_revisions_sync(self) -> dict[int, tuple[int, str]]:
         payload = self._get_store().get(include=["metadatas"])
-        result: set[int] = set()
+        result: dict[int, tuple[int, str]] = {}
         for metadata in payload.get("metadatas") or []:
             try:
-                result.add(int((metadata or {})["memory_id"]))
+                value = metadata or {}
+                result[int(value["memory_id"])] = (
+                    int(value["index_revision"]),
+                    str(value["content_fingerprint"]),
+                )
             except (KeyError, TypeError, ValueError):
                 continue
         return result
+
+    async def cleanup_obsolete_collections(self) -> int:
+        """Delete superseded SlimAgent memory collections after caller verifies coverage."""
+        if not await self.collection_exists():
+            return 0
+        return await asyncio.to_thread(self._cleanup_obsolete_collections_sync)
+
+    def _cleanup_obsolete_collections_sync(self) -> int:
+        # Release this adapter before deleting collections that may share the
+        # same persistent client/system cache.
+        self._close_sync()
+        client = chromadb.PersistentClient(path=str(self.persist_directory))
+        deleted = 0
+        try:
+            names = [collection.name for collection in client.list_collections()]
+            if self.collection_name not in names:
+                return 0
+            for name in names:
+                if (
+                    name.startswith(_MEMORY_COLLECTION_PREFIX)
+                    and name != self.collection_name
+                ):
+                    client.delete_collection(name=name)
+                    deleted += 1
+        finally:
+            _close_chroma_client(client)
+        if deleted:
+            logger.info(
+                "Removed obsolete memory vector collections",
+                extra={"deleted_collection_count": deleted},
+            )
+        return deleted
+
+    async def close(self) -> None:
+        await asyncio.to_thread(self._close_sync)
+
+    def _close_sync(self) -> None:
+        store = self._store
+        self._store = None
+        if store is not None:
+            _close_chroma_client(getattr(store, "_client", None))

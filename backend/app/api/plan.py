@@ -1,11 +1,12 @@
 import json
+import logging
 from pydantic import ValidationError
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy import select, desc, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
-from app.models.user import Exercise, Plan, User
+from app.models.user import Checkin, Exercise, Plan, User
 from app.schemas.plan import (
     CalorieAdjustRequest,
     PlanGenerateRequest,
@@ -20,6 +21,7 @@ from app.services.plan_service import generate_plan
 from app.tools.calorie_tools import calc_macros
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _to_plan_response(plan: Plan) -> PlanResponse:
@@ -92,20 +94,21 @@ async def adjust_calories(
     stmt = (
         select(Plan)
         .where(Plan.user_id == request.user_id)
-        .order_by(desc(Plan.created_at))
+        .order_by(desc(Plan.created_at), desc(Plan.id))
         .limit(1)
     )
     plan = (await db.execute(stmt)).scalar_one_or_none()
     if not plan:
         raise HTTPException(status_code=404, detail="请先生成计划")
+    if plan.id != request.plan_id:
+        raise HTTPException(status_code=409, detail="计划或打卡记录已更新，请重新生成复盘后再应用调整")
     new_target = request.daily_calorie_target
-    plan.daily_calorie_target = new_target
 
     calorie_info = json.loads(plan.calorie_info_json) if plan.calorie_info_json else {}
     calorie_info["target_calories"] = new_target
     if calorie_info.get("tdee"):
         calorie_info["deficit"] = calorie_info["tdee"] - new_target
-    plan.calorie_info_json = json.dumps(calorie_info, ensure_ascii=False)
+    calorie_info_json = json.dumps(calorie_info, ensure_ascii=False)
 
     macros = calc_macros(
         new_target,
@@ -114,8 +117,38 @@ async def adjust_calories(
         user.goal_type or "fat_loss",
         user.diet_preference or "balanced",
     )
-    plan.macros_json = json.dumps(macros, ensure_ascii=False)
+    macros_json = json.dumps(macros, ensure_ascii=False)
 
+    result = await db.execute(
+        update(Plan)
+        .where(
+            Plan.id == request.plan_id,
+            Plan.user_id == request.user_id,
+            Plan.daily_calorie_target == request.base_daily_calorie_target,
+            Plan.id == (
+                select(Plan.id)
+                .where(Plan.user_id == request.user_id)
+                .order_by(desc(Plan.created_at), desc(Plan.id))
+                .limit(1)
+                .scalar_subquery()
+            ),
+            request.source_checkin_id == (
+                select(Checkin.id)
+                .where(Checkin.user_id == request.user_id)
+                .order_by(desc(Checkin.date), desc(Checkin.id))
+                .limit(1)
+                .scalar_subquery()
+            ),
+        )
+        .values(
+            daily_calorie_target=new_target,
+            calorie_info_json=calorie_info_json,
+            macros_json=macros_json,
+        )
+    )
+    if result.rowcount != 1:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="计划或打卡记录已更新，请重新生成复盘后再应用调整")
     await db.commit()
     await db.refresh(plan)
     return _to_plan_response(plan)
@@ -127,6 +160,8 @@ async def generate_fat_loss_plan(
     db: AsyncSession = Depends(get_db),
 ):
     """生成减脂计划。信息不完整时返回 422 + 追问内容。"""
+    if not await db.get(User, request.user_id):
+        raise HTTPException(status_code=404, detail="用户不存在")
     try:
         result = await generate_plan(db, request)
         # Agent 判断信息不完整
@@ -136,10 +171,12 @@ async def generate_fat_loss_plan(
                 content=result.model_dump(),
             )
         return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"生成计划失败: {str(e)}")
+    except ValueError:
+        logger.exception("Plan generation produced invalid domain output", extra={"user_id": request.user_id})
+        raise HTTPException(status_code=502, detail="计划生成结果无效，请稍后重试")
+    except Exception:
+        logger.exception("Plan generation failed", extra={"user_id": request.user_id})
+        raise HTTPException(status_code=500, detail="计划生成失败，请稍后重试")
 
 
 @router.post("/adjust-workout", response_model=PlanResponse)
@@ -165,14 +202,22 @@ async def adjust_workout(
     if not plan:
         raise HTTPException(status_code=404, detail="请先生成计划")
     if plan.id != request.plan_id:
-        raise HTTPException(status_code=409, detail="训练计划已更新，请刷新后重新应用调整")
+        raise HTTPException(status_code=409, detail="计划或打卡记录已更新，请重新生成复盘后再应用调整")
 
     # 将浏览器提交的 JSON 当作不可信输入，完整验证嵌套结构和数值范围。
     try:
         adjusted = json.loads(request.adjusted_workout_plan_json)
         validated = WorkoutPlanData.model_validate(adjusted)
-    except (json.JSONDecodeError, ValidationError) as e:
-        raise HTTPException(status_code=400, detail=f"无效的训练计划 JSON: {e}")
+    except (json.JSONDecodeError, ValidationError) as exc:
+        logger.warning(
+            "Rejected invalid workout adjustment",
+            extra={
+                "user_id": request.user_id,
+                "plan_id": request.plan_id,
+                "error_type": type(exc).__name__,
+            },
+        )
+        raise HTTPException(status_code=400, detail="训练计划格式或数值无效")
 
     submitted_ids = {
         exercise.exercise_id
@@ -214,6 +259,20 @@ async def adjust_workout(
             Plan.id == request.plan_id,
             Plan.user_id == request.user_id,
             Plan.workout_plan_json == request.base_workout_plan_json,
+            Plan.id == (
+                select(Plan.id)
+                .where(Plan.user_id == request.user_id)
+                .order_by(desc(Plan.created_at), desc(Plan.id))
+                .limit(1)
+                .scalar_subquery()
+            ),
+            request.source_checkin_id == (
+                select(Checkin.id)
+                .where(Checkin.user_id == request.user_id)
+                .order_by(desc(Checkin.date), desc(Checkin.id))
+                .limit(1)
+                .scalar_subquery()
+            ),
         )
         .values(
             workout_plan_json=adjusted_workout_plan_json,
@@ -222,7 +281,7 @@ async def adjust_workout(
     )
     if result.rowcount != 1:
         await db.rollback()
-        raise HTTPException(status_code=409, detail="训练计划已更新，请刷新后重新应用调整")
+        raise HTTPException(status_code=409, detail="计划或打卡记录已更新，请重新生成复盘后再应用调整")
     await db.commit()
     await db.refresh(plan)
     return _to_plan_response(plan)

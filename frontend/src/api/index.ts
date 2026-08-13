@@ -58,10 +58,16 @@ export async function generatePlan(userId: number): Promise<PlanResponse> {
 // 用户确认后写入新的热量目标（复盘调整草案的确认入口）
 export async function applyCalorieAdjustment(
   userId: number,
+  planId: number,
+  sourceCheckinId: number,
+  baseDailyCalorieTarget: number,
   dailyCalorieTarget: number
 ): Promise<PlanResponse> {
   const res = await api.post<PlanResponse>('/plan/adjust-calories', {
     user_id: userId,
+    plan_id: planId,
+    source_checkin_id: sourceCheckinId,
+    base_daily_calorie_target: baseDailyCalorieTarget,
     daily_calorie_target: dailyCalorieTarget,
   })
   return res.data
@@ -71,12 +77,14 @@ export async function applyCalorieAdjustment(
 export async function applyWorkoutAdjustment(
   userId: number,
   planId: number,
+  sourceCheckinId: number,
   baseWorkoutPlanJson: string,
   adjustedWorkoutPlanJson: string
 ): Promise<PlanResponse> {
   const request: WorkoutAdjustRequest = {
     user_id: userId,
     plan_id: planId,
+    source_checkin_id: sourceCheckinId,
     base_workout_plan_json: baseWorkoutPlanJson,
     adjusted_workout_plan_json: adjustedWorkoutPlanJson,
   }
@@ -142,10 +150,12 @@ export async function recognizeIngredients(
 }
 
 export async function confirmIngredients(
+  userId: number,
   recognitionId: number,
   confirmedIngredients: IngredientItem[]
 ): Promise<{ recognition_id: number; status: string }> {
   const res = await api.post('/vision/confirm', {
+    user_id: userId,
     recognition_id: recognitionId,
     confirmed_ingredients: confirmedIngredients,
   })
@@ -322,6 +332,13 @@ export async function analyzePoseVideo(
     timeout: 180000,
   })
   return res.data
+}
+
+export async function deletePoseAnalysis(
+  userId: number,
+  analysisId: string,
+): Promise<void> {
+  await api.delete(`/pose/history/${userId}/${analysisId}`)
 }
 
 // 餐食识别（新流程）

@@ -59,7 +59,7 @@ async def update_user_profile(
     db: AsyncSession = Depends(get_db),
 ):
     """部分更新用户档案"""
-    update_data = data.model_dump(exclude_none=True)
+    update_data = data.model_dump(exclude_unset=True)
     if not update_data:
         raise HTTPException(status_code=400, detail="没有要更新的字段")
     user = await update_profile(db, user_id, update_data)

@@ -1,9 +1,9 @@
 <script setup lang="ts">
 defineOptions({ name: 'PoseView' })
-import { ref, nextTick, onActivated, useTemplateRef, watch } from 'vue'
+import { ref, nextTick, onActivated, onUnmounted, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
-import { analyzePose, analyzePoseVideo } from '../api'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { analyzePose, analyzePoseVideo, deletePoseAnalysis } from '../api'
 import type { PoseAnalysis } from '../types'
 import {
   analyzePoseImage as extractImagePose,
@@ -13,6 +13,7 @@ import gsap from 'gsap'
 
 const router = useRouter()
 const loading = ref(false)
+const deleting = ref(false)
 const analysisStage = ref('')
 const selectedFile = ref<File | null>(null)
 const previewUrl = ref('')
@@ -70,6 +71,9 @@ function onFileChange(e: Event) {
     ElMessage.warning('请选择图片或视频文件')
     return
   }
+  if (previewUrl.value.startsWith('blob:')) {
+    URL.revokeObjectURL(previewUrl.value)
+  }
   selectedFile.value = file
   previewUrl.value = URL.createObjectURL(file)
 }
@@ -122,6 +126,9 @@ async function doAnalyze() {
 }
 
 function reset() {
+  if (previewUrl.value.startsWith('blob:')) {
+    URL.revokeObjectURL(previewUrl.value)
+  }
   selectedFile.value = null
   previewUrl.value = ''
   result.value = null
@@ -130,6 +137,37 @@ function reset() {
     fileInputRef.value.value = ''
   }
 }
+
+async function deleteCurrentAnalysis() {
+  const analysisId = result.value?.analysis_id
+  const userId = Number(localStorage.getItem('userId'))
+  if (!analysisId || !Number.isInteger(userId) || userId <= 0) return
+  try {
+    await ElMessageBox.confirm(
+      '这会删除本次动作分析记录及上传的图片或视频，且无法恢复。',
+      '删除动作分析',
+      { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  deleting.value = true
+  try {
+    await deletePoseAnalysis(userId, analysisId)
+    reset()
+    ElMessage.success('动作分析及媒体已删除')
+  } catch (err: any) {
+    ElMessage.error(err.response?.data?.detail || '删除失败，请稍后重试')
+  } finally {
+    deleting.value = false
+  }
+}
+
+onUnmounted(() => {
+  if (previewUrl.value.startsWith('blob:')) {
+    URL.revokeObjectURL(previewUrl.value)
+  }
+})
 
 function severityColor(severity: string): string {
   if (severity === 'high') return 'var(--color-danger)'
@@ -376,6 +414,9 @@ const jointLabels: Record<string, string> = {
       <div class="result-actions">
         <button class="btn btn-primary" @click="reset">重新分析</button>
         <button class="btn btn-ghost" @click="router.push('/plan')">查看计划</button>
+        <button class="btn btn-danger" :disabled="deleting" @click="deleteCurrentAnalysis">
+          {{ deleting ? '删除中...' : '删除记录与媒体' }}
+        </button>
       </div>
     </div>
   </div>
@@ -494,6 +535,9 @@ const jointLabels: Record<string, string> = {
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-ghost { background: transparent; color: var(--color-text-secondary); border: 1px solid var(--color-border); }
 .btn-ghost:hover { border-color: var(--color-text-tertiary); }
+.btn-danger { background: transparent; color: var(--color-danger); border: 1px solid color-mix(in srgb, var(--color-danger) 45%, transparent); }
+.btn-danger:hover:not(:disabled) { background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+.btn-danger:disabled { opacity: 0.5; cursor: not-allowed; }
 
 @media (max-width: 640px) {
   .result-header { align-items: flex-start; flex-wrap: wrap; }

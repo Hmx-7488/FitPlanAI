@@ -6,13 +6,14 @@ import hashlib
 import json
 import logging
 import re
-from datetime import datetime, timezone
-from typing import Any, Literal
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any, Awaitable, Callable, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
-from sqlalchemy import and_, desc, or_, select
+from sqlalchemy import and_, case, desc, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +28,10 @@ from app.models.user import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class MemoryExtractionLeaseLost(RuntimeError):
+    """Raised internally when another worker owns the extraction lease."""
 
 
 class MemoryConflictError(RuntimeError):
@@ -390,6 +395,7 @@ async def persist_memory_candidates(
     conversation_id: int,
     source_message_id: int,
     candidates: list[ExtractedMemoryCandidate],
+    lease_guard: Callable[[AsyncSession], Awaitable[None]] | None = None,
 ) -> list[UserMemory]:
     """Persist validated candidates with source trace, dedupe, and conflict expiry."""
     source_stmt = (
@@ -411,6 +417,8 @@ async def persist_memory_candidates(
     created_ids: list[int] = []
     settings = get_settings()
     for candidate in candidates[:5]:
+        if lease_guard is not None:
+            await lease_guard(db)
         if candidate.valid_until is not None and candidate.valid_until <= datetime.utcnow():
             continue
         if _looks_like_prompt_injection(candidate):
@@ -761,12 +769,17 @@ async def recall_user_memories(
 async def extract_and_persist_user_memory(
     conversation_id: int,
     source_message_id: int,
+    *,
+    session_factory: Any | None = None,
+    lease_owner: str | None = None,
 ) -> int:
-    """Best-effort extraction for the exact user message that completed streaming."""
+    """Extract one message under a durable, content-free JSON lease."""
     settings = get_settings()
     if not settings.CHAT_MEMORY_EXTRACTION_ENABLED:
         return 0
-    async with async_session() as db:
+    factory = session_factory or async_session
+    owner = lease_owner or str(uuid.uuid4())
+    async with factory() as db:
         conversation = await db.get(ChatConversation, conversation_id)
         if conversation is None:
             return 0
@@ -782,37 +795,333 @@ async def extract_and_persist_user_memory(
         ).scalar_one_or_none()
         if message is None:
             return 0
-        context = {}
+        original_context = message.context_json
         try:
-            context = json.loads(message.context_json or "{}")
+            context = json.loads(original_context or "{}")
         except json.JSONDecodeError:
-            pass
+            context = {}
         if context.get("memory_extraction_status") in {"completed", "skipped"}:
             return 0
+        now = datetime.utcnow()
+        attempts = int(context.get("memory_extraction_attempts") or 0)
+        max_attempts = getattr(settings, "CHAT_MEMORY_EXTRACTION_MAX_ATTEMPTS", 5)
+        if attempts >= max_attempts:
+            return 0
+        if context.get("memory_extraction_status") == "processing":
+            try:
+                lease_until = datetime.fromisoformat(
+                    str(context.get("memory_extraction_lease_expires_at") or "")
+                )
+            except ValueError:
+                lease_until = datetime.min
+            if lease_until > now and context.get("memory_extraction_lease_owner") != owner:
+                return 0
+        if context.get("memory_extraction_status") == "failed":
+            try:
+                available_at = datetime.fromisoformat(
+                    str(context.get("memory_extraction_available_at") or "")
+                )
+            except ValueError:
+                available_at = datetime.min
+            if available_at > now:
+                return 0
+
+        context.update(
+            {
+                "memory_extraction_status": "processing",
+                "memory_extraction_attempts": attempts + 1,
+                "memory_extraction_lease_owner": owner,
+                "memory_extraction_lease_expires_at": (
+                    now + timedelta(minutes=2)
+                ).isoformat(),
+                "memory_extraction_updated_at": now.isoformat(),
+            }
+        )
+        context.pop("memory_extraction_available_at", None)
+        context.pop("memory_extraction_error_type", None)
+        claimed_context_json = json.dumps(context, ensure_ascii=False)
+        claim = await db.execute(
+            update(ChatMessage)
+            .where(
+                ChatMessage.id == source_message_id,
+                (
+                    ChatMessage.context_json.is_(None)
+                    if original_context is None
+                    else ChatMessage.context_json == original_context
+                ),
+            )
+            .values(context_json=claimed_context_json)
+        )
+        await db.commit()
+        if claim.rowcount != 1:
+            return 0
+
         message_id = source_message_id
         user_id = conversation.user_id
         try:
             candidates = await extract_memory_candidates(message.content)
+            # Do not let a slow provider response write after its lease expired
+            # or another process took ownership. Renew via compare-and-swap
+            # immediately before any governed-memory mutation.
+            renewed_at = datetime.utcnow()
+            renewed_context = dict(context)
+            renewed_context["memory_extraction_lease_expires_at"] = (
+                renewed_at + timedelta(minutes=2)
+            ).isoformat()
+            renewed_context["memory_extraction_updated_at"] = renewed_at.isoformat()
+            renewed_context_json = json.dumps(renewed_context, ensure_ascii=False)
+            renew = await db.execute(
+                update(ChatMessage)
+                .where(
+                    ChatMessage.id == source_message_id,
+                    ChatMessage.context_json == claimed_context_json,
+                )
+                .values(context_json=renewed_context_json)
+            )
+            await db.commit()
+            if renew.rowcount != 1:
+                logger.info(
+                    "Discarded stale memory extraction result",
+                    extra={
+                        "conversation_id": conversation_id,
+                        "message_id": source_message_id,
+                    },
+                )
+                return 0
+            context = renewed_context
+            claimed_context_json = renewed_context_json
+
+            async def renew_persistence_lease(guard_db: AsyncSession) -> None:
+                nonlocal context, claimed_context_json
+                guard_now = datetime.utcnow()
+                guarded_context = dict(context)
+                guarded_context["memory_extraction_lease_expires_at"] = (
+                    guard_now + timedelta(minutes=2)
+                ).isoformat()
+                guarded_context["memory_extraction_updated_at"] = (
+                    guard_now.isoformat()
+                )
+                guarded_json = json.dumps(guarded_context, ensure_ascii=False)
+                guarded = await guard_db.execute(
+                    update(ChatMessage)
+                    .where(
+                        ChatMessage.id == source_message_id,
+                        ChatMessage.context_json == claimed_context_json,
+                    )
+                    .values(context_json=guarded_json)
+                )
+                if guarded.rowcount != 1:
+                    raise MemoryExtractionLeaseLost
+                context = guarded_context
+                claimed_context_json = guarded_json
+
             created = await persist_memory_candidates(
                 db,
                 user_id=user_id,
                 conversation_id=conversation_id,
                 source_message_id=message_id,
                 candidates=candidates,
+                lease_guard=renew_persistence_lease,
             )
-            context["memory_extraction_status"] = "completed" if candidates else "skipped"
-            context["memory_candidate_count"] = len(created)
-            message.context_json = json.dumps(context, ensure_ascii=False)
+            latest_context = dict(context)
+            latest_context["memory_extraction_status"] = (
+                "completed" if candidates else "skipped"
+            )
+            latest_context["memory_candidate_count"] = len(created)
+            latest_context["memory_extraction_updated_at"] = datetime.utcnow().isoformat()
+            latest_context.pop("memory_extraction_lease_owner", None)
+            latest_context.pop("memory_extraction_lease_expires_at", None)
+            latest_context.pop("memory_extraction_available_at", None)
+            latest_context.pop("memory_extraction_error_type", None)
+            terminal_context_json = json.dumps(latest_context, ensure_ascii=False)
+            terminal = await db.execute(
+                update(ChatMessage)
+                .where(
+                    ChatMessage.id == source_message_id,
+                    ChatMessage.context_json == claimed_context_json,
+                )
+                .values(context_json=terminal_context_json)
+            )
+            if terminal.rowcount != 1:
+                raise MemoryExtractionLeaseLost
             await db.commit()
             return len(created)
         except Exception as exc:
             await db.rollback()
-            logger.warning(
-                "Memory extraction failed",
-                extra={
-                    "conversation_id": conversation_id,
-                    "message_id": message_id,
-                    "error_type": type(exc).__name__,
-                },
-            )
+            message = await db.get(ChatMessage, source_message_id)
+            if message is not None:
+                try:
+                    failed_context = json.loads(message.context_json or "{}")
+                except json.JSONDecodeError:
+                    failed_context = {}
+                if failed_context.get("memory_extraction_lease_owner") == owner:
+                    attempt_count = int(
+                        failed_context.get("memory_extraction_attempts") or attempts + 1
+                    )
+                    retry_base = getattr(
+                        settings, "CHAT_MEMORY_EXTRACTION_RETRY_BASE_SECONDS", 30
+                    )
+                    failed_at = datetime.utcnow()
+                    failed_context.update(
+                        {
+                            "memory_extraction_status": "failed",
+                            "memory_extraction_error_type": type(exc).__name__[:100],
+                            "memory_extraction_available_at": (
+                                failed_at
+                                + timedelta(
+                                    seconds=retry_base
+                                    * (2 ** max(0, attempt_count - 1))
+                                )
+                            ).isoformat(),
+                            "memory_extraction_updated_at": failed_at.isoformat(),
+                        }
+                    )
+                    failed_context.pop("memory_extraction_lease_owner", None)
+                    failed_context.pop("memory_extraction_lease_expires_at", None)
+                    message.context_json = json.dumps(
+                        failed_context, ensure_ascii=False
+                    )
+                    await db.commit()
+            if not isinstance(exc, MemoryExtractionLeaseLost):
+                logger.warning(
+                    "Memory extraction failed",
+                    extra={
+                        "conversation_id": conversation_id,
+                        "message_id": message_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
             return 0
+
+
+async def replay_pending_memory_extractions(
+    *,
+    session_factory: Any | None = None,
+    limit: int | None = None,
+) -> dict[str, int]:
+    """Restart/retry completed user messages without a terminal extraction mark."""
+    settings = get_settings()
+    if not settings.CHAT_MEMORY_EXTRACTION_ENABLED:
+        return {"eligible": 0, "attempted": 0, "created": 0}
+    factory = session_factory or async_session
+    scan_limit = limit or getattr(settings, "CHAT_MEMORY_EXTRACTION_SCAN_LIMIT", 100)
+    now = datetime.utcnow()
+    status_expr = case(
+        (
+            func.json_valid(ChatMessage.context_json) == 1,
+            func.json_extract(
+                ChatMessage.context_json, "$.memory_extraction_status"
+            ),
+        ),
+        else_=None,
+    )
+    attempts_expr = case(
+        (
+            func.json_valid(ChatMessage.context_json) == 1,
+            func.coalesce(
+                func.json_extract(
+                    ChatMessage.context_json, "$.memory_extraction_attempts"
+                ),
+                0,
+            ),
+        ),
+        else_=0,
+    )
+    available_expr = case(
+        (
+            func.json_valid(ChatMessage.context_json) == 1,
+            func.json_extract(
+                ChatMessage.context_json, "$.memory_extraction_available_at"
+            ),
+        ),
+        else_=None,
+    )
+    lease_expr = case(
+        (
+            func.json_valid(ChatMessage.context_json) == 1,
+            func.json_extract(
+                ChatMessage.context_json,
+                "$.memory_extraction_lease_expires_at",
+            ),
+        ),
+        else_=None,
+    )
+    max_attempts = getattr(settings, "CHAT_MEMORY_EXTRACTION_MAX_ATTEMPTS", 5)
+    now_iso = now.isoformat()
+    async with factory() as db:
+        rows = list(
+            (
+                await db.execute(
+                    select(
+                        ChatMessage.id,
+                        ChatMessage.conversation_id,
+                        ChatMessage.context_json,
+                    )
+                    .join(
+                        ChatConversation,
+                        ChatConversation.id == ChatMessage.conversation_id,
+                    )
+                    .where(
+                        ChatMessage.role == "user",
+                        ChatMessage.status == "completed",
+                        ChatConversation.status == "active",
+                        attempts_expr < max_attempts,
+                        or_(
+                            status_expr.is_(None),
+                            and_(
+                                status_expr == "failed",
+                                or_(
+                                    available_expr.is_(None),
+                                    available_expr <= now_iso,
+                                ),
+                            ),
+                            and_(
+                                status_expr == "processing",
+                                or_(
+                                    lease_expr.is_(None),
+                                    lease_expr <= now_iso,
+                                ),
+                            ),
+                        ),
+                    )
+                    .order_by(ChatMessage.id)
+                    .limit(scan_limit)
+                )
+            ).all()
+        )
+
+    eligible: list[tuple[int, int]] = []
+    for message_id, conversation_id, context_json in rows:
+        try:
+            context = json.loads(context_json or "{}")
+        except json.JSONDecodeError:
+            context = {}
+        status = context.get("memory_extraction_status")
+        if status in {"completed", "skipped"}:
+            continue
+        if int(context.get("memory_extraction_attempts") or 0) >= max_attempts:
+            continue
+        due_at_key = (
+            "memory_extraction_lease_expires_at"
+            if status == "processing"
+            else "memory_extraction_available_at"
+        )
+        try:
+            due_at = datetime.fromisoformat(str(context.get(due_at_key) or ""))
+        except ValueError:
+            due_at = datetime.min
+        if status in {"processing", "failed"} and due_at > now:
+            continue
+        eligible.append((conversation_id, message_id))
+        if len(eligible) >= scan_limit:
+            break
+
+    stats = {"eligible": len(eligible), "attempted": 0, "created": 0}
+    for conversation_id, message_id in eligible:
+        stats["attempted"] += 1
+        stats["created"] += await extract_and_persist_user_memory(
+            conversation_id,
+            message_id,
+            session_factory=factory,
+        )
+    return stats

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 defineOptions({ name: 'MealView' })
-import { ref, computed, nextTick, onActivated, onMounted, useTemplateRef, watch } from 'vue'
+import { ref, computed, nextTick, onActivated, onMounted, onUnmounted, useTemplateRef, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { recognizeMeal, calculateMeal, getMealDailySummary } from '../api'
@@ -91,6 +91,9 @@ async function refreshDailySummary() {
     for (const opt of mealTypeOptions) {
       const meal = summary.meals[opt.value]
       if (!meal) continue
+      if (mealStates.value[opt.value].previewUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(mealStates.value[opt.value].previewUrl)
+      }
       mealStates.value[opt.value].step = 'result'
       mealStates.value[opt.value].previewUrl = meal.image_url
       mealStates.value[opt.value].result = {
@@ -131,6 +134,9 @@ function onFileChange(e: Event) {
   if (!file.type.startsWith('image/')) {
     ElMessage.warning('请选择图片文件')
     return
+  }
+  if (mealStates.value[mealType.value].previewUrl.startsWith('blob:')) {
+    URL.revokeObjectURL(mealStates.value[mealType.value].previewUrl)
   }
   // 更新当前餐食类型的状态
   mealStates.value[mealType.value].selectedFile = file
@@ -219,6 +225,9 @@ async function doCalculate() {
 }
 
 function resetCurrentMeal() {
+  if (mealStates.value[mealType.value].previewUrl.startsWith('blob:')) {
+    URL.revokeObjectURL(mealStates.value[mealType.value].previewUrl)
+  }
   mealStates.value[mealType.value] = {
     step: 'upload',
     selectedFile: null,
@@ -231,6 +240,14 @@ function resetCurrentMeal() {
     fileInputRef.value.value = ''
   }
 }
+
+onUnmounted(() => {
+  for (const state of Object.values(mealStates.value)) {
+    if (state.previewUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(state.previewUrl)
+    }
+  }
+})
 
 function statusColor(status: string): string {
   if (status === 'on_track') return 'var(--color-accent)'

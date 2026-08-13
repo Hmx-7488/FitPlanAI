@@ -56,6 +56,9 @@ function onFileChange(e: Event) {
     ElMessage.warning('请选择图片文件')
     return
   }
+  if (previewUrl.value.startsWith('blob:')) {
+    URL.revokeObjectURL(previewUrl.value)
+  }
   selectedFile.value = file
   previewUrl.value = URL.createObjectURL(file)
 }
@@ -124,7 +127,7 @@ async function doConfirmAndGenerate() {
   loadingMsg.value = '正在确认食材...'
 
   try {
-    await confirmIngredients(recognition.value.recognition_id, valid)
+    await confirmIngredients(Number(userId), recognition.value.recognition_id, valid)
     loadingMsg.value = 'AI 正在生成轻食菜谱...'
     const result = await generateRecipes(
       Number(userId), recognition.value.recognition_id, valid
@@ -140,6 +143,9 @@ async function doConfirmAndGenerate() {
 }
 
 function resetAll() {
+  if (previewUrl.value.startsWith('blob:')) {
+    URL.revokeObjectURL(previewUrl.value)
+  }
   step.value = 'upload'
   selectedFile.value = null
   previewUrl.value = ''
@@ -249,7 +255,12 @@ onMounted(async () => {
   } catch { /* ignore */ }
 })
 
-onUnmounted(stopImagePolling)
+onUnmounted(() => {
+  stopImagePolling()
+  if (previewUrl.value.startsWith('blob:')) {
+    URL.revokeObjectURL(previewUrl.value)
+  }
+})
 </script>
 
 <template>

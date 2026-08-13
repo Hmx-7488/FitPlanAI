@@ -169,6 +169,7 @@ class WorkoutAdjustmentEndpointTests(ApiDatabaseTestCase):
             session.add_all([
                 User(id=1, gender="male", age=30, height=175, weight=75, target_weight=70),
                 User(id=2, gender="female", age=28, height=165, weight=60, target_weight=55),
+                Checkin(id=1, user_id=1, date="2026-08-11"),
                 Plan(
                     id=1,
                     user_id=1,
@@ -190,6 +191,7 @@ class WorkoutAdjustmentEndpointTests(ApiDatabaseTestCase):
         payload: object,
         user_id: int = 1,
         plan_id: int = 1,
+        source_checkin_id: int = 1,
         base_workout_plan_json: str = "",
     ):
         return self.client.post(
@@ -197,6 +199,7 @@ class WorkoutAdjustmentEndpointTests(ApiDatabaseTestCase):
             json={
                 "user_id": user_id,
                 "plan_id": plan_id,
+                "source_checkin_id": source_checkin_id,
                 "base_workout_plan_json": base_workout_plan_json,
                 "adjusted_workout_plan_json": json.dumps(payload, ensure_ascii=False),
             },
@@ -417,12 +420,6 @@ class MealDailySummaryTests(ApiDatabaseTestCase):
                     meal_total_json='{"calories_kcal":500,"protein_g":30,"carbs_g":60,"fat_g":15}',
                     items_json='[]', created_at=datetime(2026, 8, 10, 12, 0),
                 ),
-                # 兼容历史重复记录：同餐次只采用最后一条。
-                MealLog(
-                    id=3, user_id=1, date="2026-08-10", meal_type="lunch",
-                    meal_total_json='{"calories_kcal":600,"protein_g":40,"carbs_g":65,"fat_g":16}',
-                    items_json='[]', created_at=datetime(2026, 8, 10, 12, 30),
-                ),
                 MealLog(
                     id=4, user_id=1, date="2026-08-09", meal_type="dinner",
                     meal_total_json='{"calories_kcal":900,"protein_g":50,"carbs_g":100,"fat_g":25}',
@@ -436,15 +433,15 @@ class MealDailySummaryTests(ApiDatabaseTestCase):
             ])
             await session.commit()
 
-    def test_summary_groups_meals_uses_latest_duplicate_and_isolates_date(self):
+    def test_summary_groups_meals_and_isolates_date(self):
         response = self.client.get("/api/meal/daily-summary/1?date=2026-08-10")
 
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["meal_count"], 2)
-        self.assertEqual(data["consumed_kcal"], 900)
-        self.assertEqual(data["consumed"]["protein_g"], 60)
-        self.assertEqual(data["meals"]["lunch"]["id"], 3)
+        self.assertEqual(data["consumed_kcal"], 800)
+        self.assertEqual(data["consumed"]["protein_g"], 50)
+        self.assertEqual(data["meals"]["lunch"]["id"], 2)
         self.assertNotIn("legacy", data["meals"])
 
     def test_invalid_date_is_rejected(self):
@@ -842,7 +839,9 @@ class FrontendWorkoutAdjustmentContractTests(unittest.TestCase):
 
         self.assertIn("base_workout_plan_json: string", type_source)
         self.assertIn("base_workout_plan_json: baseWorkoutPlanJson", api_source)
-        self.assertIn("planRes.workout_plan_json", function_source)
+        self.assertNotIn("planRes.workout_plan_json", function_source)
+        self.assertIn("review.value?.source_workout_plan_json", function_source)
+        self.assertIn("review.value?.source_checkin_id", function_source)
         self.assertIn("baseWorkoutPlanJson", function_source)
         self.assertIn("if (applyingWorkoutAdjust.value) return", function_source)
         self.assertLess(

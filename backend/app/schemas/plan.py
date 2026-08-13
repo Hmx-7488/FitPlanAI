@@ -4,13 +4,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 class PlanGenerateRequest(BaseModel):
-    user_id: int
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: int = Field(gt=0)
 
 
 class CalorieAdjustRequest(BaseModel):
     """用户确认后的热量目标调整（写入最新计划）"""
 
-    user_id: int
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: int = Field(gt=0)
+    plan_id: int = Field(gt=0)
+    source_checkin_id: int = Field(gt=0)
+    base_daily_calorie_target: int = Field(ge=800, le=5000)
     daily_calorie_target: int = Field(ge=800, le=5000)
 
 
@@ -104,8 +111,11 @@ class WorkoutPlanData(BaseModel):
 class WorkoutAdjustRequest(BaseModel):
     """用户确认训练调整草案后的写入请求。"""
 
-    user_id: int
-    plan_id: int
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: int = Field(gt=0)
+    plan_id: int = Field(gt=0)
+    source_checkin_id: int = Field(gt=0)
     base_workout_plan_json: str = Field(max_length=100_000)
     adjusted_workout_plan_json: str = Field(min_length=2, max_length=100_000)
 

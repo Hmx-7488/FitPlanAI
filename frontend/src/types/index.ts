@@ -13,7 +13,7 @@ export interface UserProfile {
   weight: number
   target_weight: number
   target_weeks?: number | null
-  body_fat_rate?: number
+  body_fat_rate?: number | null
   activity_level: 'low' | 'medium' | 'high' | 'very_high'
   diet_preference: 'balanced' | 'high_protein' | 'low_carb' | 'vegetarian'
   goal_type: GoalType
@@ -72,6 +72,7 @@ export interface PlanResponse {
 export interface WorkoutAdjustRequest {
   user_id: number
   plan_id: number
+  source_checkin_id: number
   base_workout_plan_json: string
   adjusted_workout_plan_json: string
 }
@@ -185,6 +186,10 @@ export interface WorkoutAdjustment {
 
 export interface ReviewResponse {
   user_id: number
+  source_plan_id: number | null
+  source_daily_calorie_target: number | null
+  source_workout_plan_json: string | null
+  source_checkin_id: number
   checkin_count: number
   recent_checkins: CheckinResponse[]
   review_summary: string
@@ -217,6 +222,7 @@ export interface RecognizeResponse {
 }
 
 export interface ConfirmRequest {
+  user_id: number
   recognition_id: number
   confirmed_ingredients: IngredientItem[]
 }
